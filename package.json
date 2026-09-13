@@ -1,0 +1,21 @@
+{
+  "name": "penniless-json-repair-v2",
+  "version": "2.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test 'test/*.test.js'"
+  },
+  "dependencies": {
+    "@x402/core": "2.25.0",
+    "@x402/evm": "2.25.0",
+    "@x402/extensions": "2.25.0",
+    "@x402/hono": "2.25.0",
+    "hono": "^4.9.8",
+    "@x402/mcp": "2.25.0",
+    "@modelcontextprotocol/sdk": "^1.30.0"
+  },
+  "devDependencies": {
+    "wrangler": "^4.131.1"
+  }
+}

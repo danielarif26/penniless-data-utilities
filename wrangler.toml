@@ -1,0 +1,9 @@
+name = "penniless-json-repair"
+main = "src/index.js"
+compatibility_date = "2026-09-01"
+
+[vars]
+X402_NETWORK = "eip155:8453"
+X402_FACILITATOR = "https://facilitator.payai.network"
+X402_PRICE = "$0.001"
+X402_PAY_TO = "0x3D98800c64C345950E1eAaa076D88C12d1BF5F37"
