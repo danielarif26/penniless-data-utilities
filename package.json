@@ -4,8 +4,8 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "node --test 'test/*.test.js'",
-    "test:client": "node --test 'client/test/*.test.js'",
+    "test": "node --test test/*.test.js",
+    "test:client": "node --test client/test/*.test.js",
     "verify:live": "node client/scripts/verify-live.mjs"
   },
   "dependencies": {
