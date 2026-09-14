@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { HTTPFacilitatorClient } from "@x402/core/server";
-import app from "../src/index.js";
+import app, { hasSettlementResponse } from "../src/index.js";
 import { NETWORK, TOOLS } from "../src/shared.js";
 
 // A small in-memory D1 double. It deliberately keeps the chainable D1 shape
@@ -178,6 +178,12 @@ function paymentRequired(response) {
 }
 
 test.beforeEach(() => db.clear());
+
+test("settlement evidence recognizes x402 Payment-Response and native MPP Payment-Receipt", () => {
+  assert.equal(hasSettlementResponse(new Response(null, { headers: { "payment-response": "x402-ok" } })), true);
+  assert.equal(hasSettlementResponse(new Response(null, { headers: { "payment-receipt": "mpp-ok" } })), true);
+  assert.equal(hasSettlementResponse(new Response(null, { headers: { "www-authenticate": "Payment ..." } })), false);
+});
 
 test("unpaid GET increments requests and paid_attempts, but not settled_success", async () => {
   const response = await fetchWithCounters("/repair/json", "GET");

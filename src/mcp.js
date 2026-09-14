@@ -54,7 +54,7 @@ function buildServer(resourceServer) {
       description:
         "Deterministic data utilities for agents, paid per call in USDC on Base over x402: JSON repair, YAML to JSON, cron next-run, text diff, HTML/text extraction, WHOIS, DNS, GitHub repo stats, email validation.",
       instructions:
-        `Every tool costs ${PRICE} USDC on Base via x402. Call tools/list first; an unpaid tools/call returns an x402 payment-required error whose data carries the payment requirements. Attach the signed payment in the request _meta (x402 version 2) and retry the same call.`,
+        `Every tool costs ${PRICE} USDC on Base via x402 v2. Call tools/list first; an unpaid tools/call returns a payment-required error whose data carries the payment requirements. Attach the signed x402 payment in the request _meta and retry the same call.`,
       website: ORIGIN,
     },
   );

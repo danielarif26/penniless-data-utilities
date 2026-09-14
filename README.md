@@ -1,7 +1,7 @@
 # Penniless Data Utilities
 
-Nine deterministic data and lookup tools for AI agents, paid per call in USDC on
-Base over [x402](https://x402.org). No accounts, no API keys, no rate-limit
+Nine deterministic data and lookup tools for AI agents, paid per call in USDC.
+REST advertises both native MPP and [x402](https://x402.org); MCP uses x402 v2. No accounts, no API keys, no rate-limit
 tiers. Every tool is pure computation or a keyless public lookup — none of them
 call another AI model, so results are reproducible.
 
@@ -11,10 +11,9 @@ call another AI model, so results are reproducible.
 
 ## Pricing
 
-`$0.001` USDC per call, x402 version 2, network `eip155:8453`, scheme `exact`.
+`$0.001` USDC per call. REST advertises native MPP plus x402 v2 (`eip155:8453`, scheme `exact`); MCP uses x402 v2.
 
-Settlements are verified by the free-tier [PayAI](https://facilitator.payai.network)
-facilitator. Recipient (`payTo`): `0x3D98800c64C345950E1eAaa076D88C12d1BF5F37`.
+Base x402 settlements are verified by the free-tier [PayAI](https://facilitator.payai.network) facilitator. Native MPP is negotiated by `mppx`. Recipient (`payTo`): `0x3D98800c64C345950E1eAaa076D88C12d1BF5F37`.
 
 ## Connect over MCP
 
@@ -87,14 +86,15 @@ facilitator has settled.
 
 ```bash
 npm install
-npm test        # 69 tests, runs fully offline (facilitator + upstream are injected)
+npm test        # 133 tests, runs fully offline (facilitator + upstream are injected)
 npx wrangler dev
 npx wrangler deploy
 ```
 
 Environment (set in `wrangler.toml`): `X402_NETWORK`, `X402_FACILITATOR`,
-`X402_PRICE`, `X402_PAY_TO`. The worker holds no credentials — it only receives
-payments, so nothing secret is deployed with it.
+`X402_PRICE`, `X402_PAY_TO`. Production also has an encrypted Cloudflare secret
+`MPP_SECRET_KEY` used only to authenticate MPP challenges. Wallet private keys are
+never deployed to the Worker.
 
 ## Maintainer
 

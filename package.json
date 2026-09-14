@@ -9,13 +9,14 @@
     "verify:live": "node client/scripts/verify-live.mjs"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "@x402/core": "2.25.0",
     "@x402/evm": "2.25.0",
     "@x402/extensions": "2.25.0",
     "@x402/hono": "2.25.0",
-    "hono": "^4.9.8",
     "@x402/mcp": "2.25.0",
-    "@modelcontextprotocol/sdk": "^1.30.0"
+    "hono": "^4.9.8",
+    "mppx": "^0.9.3"
   },
   "devDependencies": {
     "wrangler": "^4.131.1"

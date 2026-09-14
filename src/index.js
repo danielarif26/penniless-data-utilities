@@ -1,8 +1,8 @@
 import { Hono } from "hono";
 import { paymentMiddleware, x402ResourceServer } from "@x402/hono";
+import { mpp as mppPaymentMiddleware } from "mppx/x402/hono";
 import { ExactEvmScheme } from "@x402/evm/exact/server";
 import { HTTPFacilitatorClient } from "@x402/core/server";
-import { declareDiscoveryExtension } from "@x402/extensions/bazaar";
 import {
   TOOLS, ACCEPTS, ORIGIN, PAY_TO, NETWORK, FACILITATOR, PRICE, PRICE_USD, SEMANTIC,
   validateArgs,
@@ -88,8 +88,10 @@ const TRACKED_COUNTER_PATHS = [
   ...FREE_COUNTER_PATHS,
 ];
 
-function hasSettlementResponse(response) {
-  return response.headers.has("payment-response");
+export function hasSettlementResponse(response) {
+  // x402 v2 attaches Payment-Response; native MPP attaches Payment-Receipt.
+  // Either header is settlement evidence. A bare HTTP 402/WWW-Authenticate is not.
+  return response.headers.has("payment-response") || response.headers.has("payment-receipt");
 }
 
 function parseMcpResponsePayloads(body) {
@@ -248,7 +250,9 @@ for (const [path, t] of Object.entries(TOOLS)) {
     mimeType: "application/json",
     serviceName: t.serviceName,
     tags: t.tags,
-    extensions: declareDiscoveryExtension({ bodyType: "json", input: t.input, inputSchema: { type: "object" }, output: { example: t.out, schema: { type: "object" } } }),
+    // Keep the payment challenge extension-free so the official mppx x402
+    // compatibility negotiator can faithfully expose the same EIP-3009 offer
+    // over both MPP and x402. Discovery metadata remains in OpenAPI/well-known.
   };
 }
 
@@ -282,7 +286,25 @@ for (const path of Object.keys(TOOLS)) {
   });
 }
 
-app.use(paymentMiddleware(routes, resourceServer, undefined, undefined, false));
+const x402OnlyMiddleware = paymentMiddleware(routes, resourceServer, undefined, undefined, false);
+let dualRailMiddleware = null;
+let dualRailSecret = null;
+
+app.use("*", async (c, next) => {
+  const secret = c.env?.MPP_SECRET_KEY;
+  if (!secret) return x402OnlyMiddleware(c, next);
+  if (String(secret).length < 32) {
+    return c.json({ ok: false, error: "MPP server secret is misconfigured" }, 503);
+  }
+  if (!dualRailMiddleware || dualRailSecret !== secret) {
+    dualRailSecret = secret;
+    dualRailMiddleware = mppPaymentMiddleware(routes, resourceServer, {
+      secretKey: secret,
+      realm: new URL(ORIGIN).host,
+    });
+  }
+  return dualRailMiddleware(c, next);
+});
 
 for (const path of Object.keys(TOOLS)) {
   app.post(path, async (c) => {
@@ -312,7 +334,7 @@ app.post("/mcp", async (c) => {
 });
 
 app.get("/health", (c) => c.json({
-  ok: true, x402Version: 2, network: NETWORK, price: PRICE, facilitator: FACILITATOR,
+  ok: true, x402Version: 2, mppRestEnabled: Boolean(c.env?.MPP_SECRET_KEY), network: NETWORK, price: PRICE, facilitator: FACILITATOR,
   endpoints: Object.keys(TOOLS), mcp: `${ORIGIN}/mcp`,
 }));
 app.get("/stats", async (c) => {
@@ -363,6 +385,18 @@ app.get("/.well-known/x402", (c) => c.json({
   openapi: `${ORIGIN}/openapi.json`,
   llms: `${ORIGIN}/llms.txt`,
   mcp: `${ORIGIN}/mcp`,
+  // MPP (Machine Payments Protocol) server info for MPPscan discovery
+  mpp: {
+    enabled: Boolean(c.env?.MPP_SECRET_KEY),
+    paymentServer: {
+      scheme: "exact",
+      network: NETWORK,
+      payTo: PAY_TO,
+      price: PRICE,
+      asset: "USDC",
+      assetAddress: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+    },
+  },
   resources: [
     ...Object.entries(TOOLS).map(([path, t]) => ({
       url: `${ORIGIN}${path}`, method: "POST", description: t.desc,
@@ -378,9 +412,9 @@ app.get("/.well-known/x402", (c) => c.json({
 
 app.get("/llms.txt", (c) => c.text(`${ORIGIN} - Penniless Data Utilities
 
-All paid endpoints: x402 v2, ${PRICE} USDC on Base (eip155:8453), payTo ${PAY_TO}.
+All paid endpoints: x402 v2 / MPP, ${PRICE} USDC on Base (eip155:8453), payTo ${PAY_TO}.
 
-MCP (streamable HTTP): ${ORIGIN}/mcp - the same nine tools, priced per tools/call.
+MCP (streamable HTTP): ${ORIGIN}/mcp - the same nine tools over x402 v2, priced per tools/call.
 
 Paid:
   POST /repair/json       {input}       -> {ok, repaired, applied}   malformed LLM JSON -> valid JSON
@@ -395,6 +429,11 @@ Paid:
 
 Free:
   POST /diagnose      {input}      -> {parsesNow, problems[]}   JSON problem classifier
+
+Payment discovery:
+  x402 v2:      ${ORIGIN}/.well-known/x402
+  MPP Bazaar:   Enable via x402 discovery - same endpoint
+  MPPscan:      Discover at ${ORIGIN}/.well-known/x402
 `));
 
 app.get("/openapi.json", (c) => {
@@ -404,12 +443,12 @@ app.get("/openapi.json", (c) => {
       post: {
         summary: t.serviceName,
         description: t.desc,
-        "x-payment-info": { price: { mode: "fixed", currency: "USD", amount: PRICE_USD }, protocols: [{ x402: {} }] },
+        "x-payment-info": { price: { mode: "fixed", currency: "USD", amount: PRICE_USD }, protocols: [{ x402: {} }, { mpp: {} }] },
         requestBody: { required: true, content: { "application/json": { schema: t.schema } } },
         responses: {
           "200": { description: "Result.", content: { "application/json": { schema: { type: "object" } } } },
           "400": { description: "Invalid request body." },
-          "402": { description: "Payment required (x402 v2)." },
+          "402": { description: "Payment required (x402 v2 / MPP)." },
           "413": { description: "Input exceeds maxBytes." },
         },
       },
@@ -417,14 +456,23 @@ app.get("/openapi.json", (c) => {
   }
   paths["/diagnose"] = { post: { summary: "Free JSON problem classifier", description: "Free pre-check before paying for /repair/json.", requestBody: { required: true, content: { "application/json": { schema: { type: "object" } } } }, responses: { "200": { description: "ok" } } } };
   paths["/health"] = { get: { summary: "Liveness + config", responses: { "200": { description: "ok" } } } };
-  paths["/mcp"] = { post: { summary: "MCP streamable HTTP transport", description: `Model Context Protocol endpoint exposing the same tools. Per-call price ${PRICE} USDC on Base.`, responses: { "200": { description: "JSON-RPC response." }, "402": { description: "Payment required." } } } };
+  paths["/mcp"] = { post: { summary: "MCP streamable HTTP transport", description: `Model Context Protocol endpoint exposing the same tools over x402 v2. Per-call price ${PRICE} USDC on Base.`, responses: { "200": { description: "JSON-RPC response." }, "402": { description: "Payment required (x402 v2)." } } } };
   return c.json({
     openapi: "3.1.0",
     info: {
       title: "Penniless Data Utilities",
       description: SEMANTIC,
       version: "3.1.0",
-      "x-guidance": "Deterministic data and lookup tools for agents. Use /repair/json when JSON.parse rejects near-JSON from an LLM; /yaml/tojson to turn YAML config into JSON; /cron/nextrun to resolve a cron schedule; /diff to compare two texts; /text/extract to pull links/emails/headings from HTML; /domain/whois and /dns/lookup for domain registration and DNS records; /github/repo-stats for repository popularity; /email/validate to check syntax plus MX deliverability. Either call the REST paths directly or connect an MCP client to /mcp. Paid endpoints return HTTP 402 with an x402 payment requirement; call via an x402 client (e.g. agentcash fetch). /diagnose and /health are free.",
+      "x-guidance": "Deterministic data and lookup tools for agents. Use /repair/json when JSON.parse rejects near-JSON from an LLM; /yaml/tojson to turn YAML config into JSON; /cron/nextrun to resolve a cron schedule; /diff to compare two texts; /text/extract to pull links/emails/headings from HTML; /domain/whois and /dns/lookup for domain registration and DNS records; /github/repo-stats for repository popularity; /email/validate to check syntax plus MX deliverability. Call the REST paths directly over x402 v2 or native MPP, or connect an MCP client to /mcp over x402 v2. Paid REST endpoints return HTTP 402 advertising both rails; MCP tools/call uses x402 v2. /diagnose and /health are free.",
+      "x-payment-server": {
+        scheme: "exact",
+        network: NETWORK,
+        payTo: PAY_TO,
+        price: PRICE,
+        asset: "USDC",
+        assetAddress: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
+        mpp: { enabled: Boolean(c.env?.MPP_SECRET_KEY) },
+      },
     },
     servers: [{ url: ORIGIN }],
     paths,
