@@ -35,7 +35,7 @@ async function ensureResourceServerInitialized() {
 
 const routes = {};
 for (const [path, t] of Object.entries(TOOLS)) {
-  routes[`POST ${path}`] = {
+  routes[`* ${path}`] = {
     accepts: ACCEPTS,
     description: t.desc,
     mimeType: "application/json",
@@ -110,6 +110,13 @@ app.post("/diagnose", async (c) => {
   try { JSON.parse(input); } catch { parsesNow = false; }
   return c.json({ ok: true, parsesNow, inputBytes: input.length, problems, paidRepair: `POST /repair/json at ${PRICE} via x402 (USDC on Base)` });
 });
+
+// Static domain-verification token published by 402index.io for instant approval.
+// It is public by design (served at /.well-known/) and carries no authority.
+app.get("/.well-known/402index-verify.txt", (c) =>
+  c.text("b32507a03d228eb51199ec7fed5842e4bc2d1aed8b062557310d5a676b90d67b\n", 200, {
+    "Content-Type": "text/plain; charset=utf-8",
+  }));
 
 app.get("/.well-known/x402", (c) => c.json({
   version: 1,
