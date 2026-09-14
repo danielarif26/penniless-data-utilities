@@ -1,0 +1,27 @@
+{
+  "name": "penniless-data-utilities-client",
+  "version": "0.1.0",
+  "description": "Paying x402 client for Penniless Data Utilities",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "bin": {
+    "pdu": "./cli.js"
+  },
+  "exports": {
+    ".": "./index.js",
+    "./server": "./index.js"
+  },
+  "scripts": {
+    "test": "node --test 'test/*.test.js'",
+    "verify:live": "node scripts/verify-live.mjs"
+  },
+  "dependencies": {
+    "@x402/core": "2.25.0",
+    "@x402/evm": "2.25.0",
+    "@x402/fetch": "2.25.0",
+    "viem": "2.56.5"
+  }
+}
