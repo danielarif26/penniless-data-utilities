@@ -17,6 +17,7 @@ test("agent.json manifest exposes every paid tool with Base USDC pricing", () =>
   }]);
 
   assert.equal(manifest.intents.length, Object.keys(TOOLS).length);
+  assert.equal(new Set(manifest.intents.map((intent) => intent.name)).size, manifest.intents.length);
   const byEndpoint = new Map(manifest.intents.map((intent) => [intent.endpoint, intent]));
   for (const [endpoint, tool] of Object.entries(TOOLS)) {
     const intent = byEndpoint.get(endpoint);
