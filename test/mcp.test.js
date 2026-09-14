@@ -39,6 +39,7 @@ test("mcp lists all nine tools with descriptions and schemas", async () => {
     for (const tool of tools) {
       assert.ok(tool.description.includes("per call"), `${tool.name} should state pricing`);
       assert.equal(tool.inputSchema.type, "object");
+      assert.equal(tool.inputSchema.additionalProperties, false, `${tool.name} must reject unknown arguments`);
       assert.ok(Array.isArray(tool.inputSchema.required) && tool.inputSchema.required.length > 0);
     }
     const repair = tools.find((t) => t.name === "repair_json");
@@ -130,5 +131,10 @@ test("mcp rejects unknown tool, bad enum, and missing required args", async () =
 
     const missing = await client.callTool({ name: "dns_lookup", arguments: { type: "MX" } });
     assert.equal(missing.isError, true);
+
+    const extra = await client.callTool({
+      name: "repair_json", arguments: { input: "{a:1}", unexpected: true },
+    });
+    assert.equal(extra.isError, true, "unknown MCP arguments must be rejected, not stripped");
   });
 });

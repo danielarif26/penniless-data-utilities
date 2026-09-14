@@ -11,6 +11,7 @@ test("worker entrypoint serves Open 402 manifest without payment", async () => {
   );
 
   assert.equal(response.status, 200);
+  assert.equal(response.headers.get("access-control-allow-origin"), "*");
   assert.match(response.headers.get("content-type") ?? "", /application\/json/);
   assert.match(response.headers.get("cache-control") ?? "", /max-age=300/);
   const manifest = await response.json();

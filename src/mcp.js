@@ -27,7 +27,9 @@ function buildZodSchema(schema) {
     const field = zodField(spec);
     shape[key] = required.has(key) ? field : field.optional();
   }
-  return z.object(shape);
+  // Match the public JSON Schema (`additionalProperties: false`) and REST
+  // validation instead of silently stripping unknown MCP arguments.
+  return z.object(shape).strict();
 }
 
 // MCP over streamable HTTP, stateless: Cloudflare Workers must not hold session

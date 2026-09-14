@@ -16,7 +16,7 @@ export function buildAgentManifest() {
     version: "1.4",
     origin: new URL(ORIGIN).host,
     display_name: "Penniless Data Utilities",
-    description: "Nine deterministic data and lookup utilities for AI agents, paid per call with x402 v2 USDC on Base; no API key or signup required.",
+    description: "Nine deterministic data and lookup utilities for AI agents, paid per call over x402 v2 or native MPP; no API key or signup required.",
     payout_address: PAY_TO,
     payments: {
       x402: {

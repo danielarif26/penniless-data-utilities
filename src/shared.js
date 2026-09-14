@@ -182,6 +182,11 @@ export function validateArgs(schema, args) {
   for (const key of schema.required ?? []) {
     if (args[key] === undefined) return `field '${key}' is required`;
   }
+  if (schema.additionalProperties === false) {
+    for (const key of Object.keys(args)) {
+      if (!Object.hasOwn(schema.properties, key)) return `field '${key}' is not allowed`;
+    }
+  }
   for (const [key, spec] of Object.entries(schema.properties)) {
     const value = args[key];
     if (value === undefined || value === null) continue;

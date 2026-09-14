@@ -55,3 +55,9 @@ test("optional args may be omitted or null", () => {
 test("mcp price is the atomic USDC form of the advertised price", () => {
   assert.equal(PRICE_ATOMIC, "1000");
 });
+
+
+test("validateArgs rejects undeclared extra arguments", () => {
+  const schema = TOOLS["/repair/json"].schema;
+  assert.match(validateArgs(schema, { input: "{}", surprise: true }), /not allowed/);
+});

@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { cors } from "hono/cors";
 import { paymentMiddleware, x402ResourceServer } from "@x402/hono";
 import { mpp as mppPaymentMiddleware } from "mppx/x402/hono";
 import { ExactEvmScheme } from "@x402/evm/exact/server";
@@ -258,6 +259,17 @@ for (const [path, t] of Object.entries(TOOLS)) {
 
 const app = new Hono();
 
+// Browser clients must be able to complete CORS preflight before negotiating a
+// payment. In particular, OPTIONS must never be paywalled, and the payment
+// challenge/settlement headers must be readable by cross-origin clients.
+app.use("*", cors({
+  origin: "*",
+  allowMethods: ["GET", "HEAD", "POST", "PUT", "DELETE", "OPTIONS"],
+  allowHeaders: ["Content-Type", "Payment-Signature", "X-PAYMENT", "Authorization"],
+  exposeHeaders: ["PAYMENT-REQUIRED", "PAYMENT-RESPONSE", "WWW-Authenticate", "Payment-Receipt"],
+  maxAge: 86400,
+}));
+
 // This is registered before x402 so it observes both 402 requirements and the
 // final settled response, while the D1 work itself runs only after the response
 // has been produced.
@@ -314,7 +326,11 @@ for (const path of Object.keys(TOOLS)) {
     const tool = TOOLS[path];
     const bad = validateArgs(tool.schema, body);
     if (bad) return c.json({ ok: false, error: bad }, 400);
-    return c.json(await tool.handler(body));
+    const result = await tool.handler(body);
+    // x402 settles only after a successful (<400) handler response. A tool-level
+    // failure must therefore be an HTTP error as well as `{ ok: false }`, or a
+    // caller can be charged for a failed operation.
+    return c.json(result, result?.ok === false ? 422 : 200);
   });
 }
 

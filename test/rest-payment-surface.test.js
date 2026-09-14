@@ -36,7 +36,7 @@ test.after(() => {
   HTTPFacilitatorClient.prototype.settle = realSettle;
 });
 
-const PAID_METHODS = ["GET", "HEAD", "OPTIONS", "PUT", "DELETE", "POST"];
+const PAID_METHODS = ["GET", "HEAD", "PUT", "DELETE", "POST"];
 const payer = privateKeyToAccount(
   "0x0123456789012345678901234567890123456789012345678901234567890123",
 );
@@ -86,6 +86,29 @@ test("every paid REST path requires the same x402 v2 payment for every HTTP meth
   }
 });
 
+test("CORS preflight is free and payment headers are exposed to browser clients", async () => {
+  const preflight = await app.fetch(new Request("http://localhost/repair/json", {
+    method: "OPTIONS",
+    headers: {
+      origin: "https://example.com",
+      "access-control-request-method": "POST",
+      "access-control-request-headers": "content-type,payment-signature,x-payment",
+    },
+  }));
+  assert.equal(preflight.status, 204);
+  assert.equal(preflight.headers.get("access-control-allow-origin"), "*");
+  assert.match(preflight.headers.get("access-control-allow-methods") ?? "", /POST/);
+  assert.match(preflight.headers.get("access-control-allow-headers") ?? "", /Payment-Signature/i);
+  assert.equal(preflight.headers.has("payment-required"), false, "preflight must not trigger a payment challenge");
+
+  const challenge = await app.fetch(request("/repair/json", "POST", { origin: "https://example.com" }));
+  assert.equal(challenge.status, 402);
+  assert.equal(challenge.headers.get("access-control-allow-origin"), "*");
+  const exposed = challenge.headers.get("access-control-expose-headers") ?? "";
+  assert.match(exposed, /PAYMENT-REQUIRED/i);
+  assert.match(exposed, /PAYMENT-RESPONSE/i);
+});
+
 test("a payment echoed from the real requirement cannot settle a non-successful GET", async () => {
   const unpaid = await app.fetch(request("/repair/json", "GET"));
   assert.equal(unpaid.status, 402);
@@ -122,6 +145,26 @@ test("a paid POST still runs its handler and settles exactly once", async () => 
   assert.equal(verifyCalls, verificationsBefore + 1);
   assert.equal(settleCalls, settlementsBefore + 1, "a successful paid POST must settle once");
   assert.ok(response.headers.get("payment-response"), "settlement response header must be returned");
+});
+
+test("a paid POST whose tool returns ok:false is not settled", async () => {
+  const path = "/repair/json";
+  const original = TOOLS[path].handler;
+  TOOLS[path].handler = async () => ({ ok: false, error: "synthetic tool failure" });
+  try {
+    const unpaid = await app.fetch(request(path, "POST"));
+    const requirement = paymentRequired(unpaid, `POST ${path}`);
+    const payment = await paymentClient.createPaymentPayload(requirement);
+    const settlementsBefore = settleCalls;
+    const response = await app.fetch(request(path, "POST", {
+      ...paymentClient.encodePaymentSignatureHeader(payment),
+    }));
+    assert.equal(response.status, 422, "tool failure must be an HTTP error so x402 cancels settlement");
+    assert.deepEqual(await response.json(), { ok: false, error: "synthetic tool failure" });
+    assert.equal(settleCalls, settlementsBefore, "failed tool output must never settle or charge payment");
+  } finally {
+    TOOLS[path].handler = original;
+  }
 });
 
 test("free REST discovery and diagnostic endpoints stay free", async () => {

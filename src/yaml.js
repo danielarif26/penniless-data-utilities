@@ -81,7 +81,9 @@ export function yamlToValue(input) {
         value = parseScalar(value);
       }
       if (isSeq) container.push(value);
-      else container[row.key] = value;
+      else Object.defineProperty(container, row.key, {
+        value, enumerable: true, writable: true, configurable: true,
+      });
       i = j;
     }
     return container;

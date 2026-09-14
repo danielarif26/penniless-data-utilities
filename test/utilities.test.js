@@ -100,3 +100,14 @@ test("extract strips script/style", () => {
   assert.match(r.text, /visible <text>/);
   assert.doesNotMatch(r.text, /var x/);
 });
+
+
+test("yaml __proto__ is preserved as data without mutating the object prototype", () => {
+  const result = yamlToValue("__proto__:\n  polluted: true\nsafe: yes");
+  assert.equal(result.ok, true);
+  assert.equal(Object.getPrototypeOf(result.value), Object.prototype);
+  assert.equal(Object.prototype.polluted, undefined);
+  assert.equal(Object.hasOwn(result.value, "__proto__"), true);
+  assert.deepEqual(result.value.__proto__, { polluted: true });
+  assert.equal(result.value.safe, "yes");
+});
