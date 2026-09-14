@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { buildAgentManifest } from "../src/agent-manifest.js";
-import { PAY_TO, PRICE_USD, TOOLS, USDC_BASE } from "../src/shared.js";
+import { FACILITATOR, PAY_TO, PRICE_USD, TOOLS, USDC_BASE } from "../src/shared.js";
 
 test("agent.json manifest exposes every paid tool with Base USDC pricing", () => {
   const manifest = buildAgentManifest();
@@ -13,6 +13,7 @@ test("agent.json manifest exposes every paid tool with Base USDC pricing", () =>
     network: "base",
     asset: "USDC",
     contract: USDC_BASE,
+    facilitator: FACILITATOR,
   }]);
 
   assert.equal(manifest.intents.length, Object.keys(TOOLS).length);
@@ -24,6 +25,9 @@ test("agent.json manifest exposes every paid tool with Base USDC pricing", () =>
     assert.equal(intent.method, "POST");
     assert.equal(intent.price.amount, Number(PRICE_USD));
     assert.equal(intent.price.currency, "USDC");
+    assert.equal(intent.price.model, "per_call");
+    assert.equal(intent.price.network, "base");
+    assert.equal(intent.payments.x402.direct_price, Number(PRICE_USD));
     for (const required of tool.schema.required ?? []) {
       assert.equal(intent.parameters[required]?.required, true, `${endpoint} ${required} should be required`);
     }
