@@ -1,4 +1,4 @@
-import { TOOLS, ORIGIN, PAY_TO, PRICE_USD, USDC_BASE } from "./shared.js";
+import { TOOLS, ORIGIN, PAY_TO, PRICE_USD, USDC_BASE, FACILITATOR } from "./shared.js";
 
 function parametersFromSchema(schema = {}) {
   const required = new Set(schema.required ?? []);
@@ -11,6 +11,7 @@ function parametersFromSchema(schema = {}) {
 }
 
 export function buildAgentManifest() {
+  const price = Number(PRICE_USD);
   return {
     version: "1.4",
     origin: new URL(ORIGIN).host,
@@ -23,6 +24,7 @@ export function buildAgentManifest() {
           network: "base",
           asset: "USDC",
           contract: USDC_BASE,
+          facilitator: FACILITATOR,
         }],
       },
     },
@@ -33,12 +35,15 @@ export function buildAgentManifest() {
       method: "POST",
       parameters: parametersFromSchema(tool.schema),
       price: {
-        amount: Number(PRICE_USD),
+        amount: price,
         currency: "USDC",
+        model: "per_call",
+        network: "base",
       },
       payments: {
         x402: {
-          networks: [{ network: "base", asset: "USDC", contract: USDC_BASE }],
+          direct_price: price,
+          description: `Pay ${PRICE_USD} USDC per successful call via x402 v2 on Base.`,
         },
       },
     })),
