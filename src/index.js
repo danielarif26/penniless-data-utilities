@@ -33,6 +33,213 @@ async function ensureResourceServerInitialized() {
   }
 }
 
+// Counters are deliberately kept outside the request path. They are telemetry,
+// never a precondition for serving or settling a payment.
+const COUNTER_SCHEMA = `
+  CREATE TABLE IF NOT EXISTS endpoint_counters (
+    endpoint TEXT PRIMARY KEY,
+    requests INTEGER NOT NULL DEFAULT 0,
+    paid_attempts INTEGER NOT NULL DEFAULT 0,
+    settled_success INTEGER NOT NULL DEFAULT 0,
+    free_requests INTEGER NOT NULL DEFAULT 0,
+    first_seen TEXT NOT NULL,
+    last_seen TEXT NOT NULL
+  )
+`;
+const COUNTER_UPSERT = `
+  INSERT INTO endpoint_counters (
+    endpoint, requests, paid_attempts, settled_success, free_requests, first_seen, last_seen
+  ) VALUES (?, 1, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+  ON CONFLICT(endpoint) DO UPDATE SET
+    requests = requests + 1,
+    paid_attempts = paid_attempts + excluded.paid_attempts,
+    settled_success = settled_success + excluded.settled_success,
+    free_requests = free_requests + excluded.free_requests,
+    last_seen = CURRENT_TIMESTAMP
+`;
+let countersInitPromise = null;
+let countersInitDatabase = null;
+
+function ensureCountersInitialized(db) {
+  if (!db?.prepare) return Promise.resolve(false);
+  if (countersInitDatabase === db && countersInitPromise) return countersInitPromise;
+  countersInitDatabase = db;
+  countersInitPromise = db.prepare(COUNTER_SCHEMA).run()
+    .then(() => true)
+    .catch((error) => {
+      if (countersInitDatabase === db) {
+        countersInitDatabase = null;
+        countersInitPromise = null;
+      }
+      throw error;
+    });
+  return countersInitPromise;
+}
+
+const FREE_COUNTER_PATHS = new Set([
+  "/health",
+  "/diagnose",
+  "/stats",
+  "/.well-known/402index-verify.txt",
+]);
+const TRACKED_COUNTER_PATHS = [
+  ...Object.keys(TOOLS),
+  "/mcp",
+  ...FREE_COUNTER_PATHS,
+];
+
+function hasSettlementResponse(response) {
+  return response.headers.has("payment-response");
+}
+
+function parseMcpResponsePayloads(body) {
+  const payloads = [];
+  try {
+    payloads.push(JSON.parse(body));
+    return payloads;
+  } catch {
+    // Streamable HTTP may send JSON-RPC results as SSE: each event's data
+    // field is still JSON, and a response can contain more than one event.
+    for (const event of body.split(/\r?\n\r?\n/)) {
+      const data = event.split(/\r?\n/)
+        .filter((line) => line.startsWith("data:"))
+        .map((line) => line.slice(5).trimStart())
+        .join("\n");
+      if (!data) continue;
+      try {
+        payloads.push(JSON.parse(data));
+      } catch {
+        // Ignore non-JSON SSE events (for example, a keepalive).
+      }
+    }
+  }
+  return payloads;
+}
+
+async function mcpCounterFlags(request, response) {
+  const flags = { endpoint: "/mcp", paidAttempt: 0, settledSuccess: 0, freeRequest: 0 };
+  try {
+    const requestBody = await request.json();
+    if (requestBody?.method === "tools/list") {
+      flags.freeRequest = 1;
+      return flags;
+    }
+    if (requestBody?.method !== "tools/call") return flags;
+
+    const tool = Object.entries(TOOLS).find(([, value]) => value.mcpName === requestBody?.params?.name);
+    if (!tool) return flags;
+    flags.endpoint = tool[0];
+    // An MCP tools/call maps to its matching paid REST endpoint. Unlike REST,
+    // its payment-required result is JSON-RPC 200, so the attempt is known from
+    // the call itself rather than an HTTP 402 status.
+    flags.paidAttempt = 1;
+
+    const payloads = parseMcpResponsePayloads(await response.text());
+    flags.settledSuccess = response.status >= 200 && response.status < 300
+      && payloads.some((body) => {
+        const result = body?.result ?? body;
+        const settlement = result?._meta?.["x402/payment-response"];
+        return result?.isError !== true && settlement?.success === true;
+      })
+      ? 1
+      : 0;
+  } catch (error) {
+    // A transport body that cannot be read is still counted as a request below.
+    console.error("MCP counter classification failed", error);
+  }
+  return flags;
+}
+
+async function recordCounter(db, path, response, mcpRequest, mcpResponse) {
+  if (!db?.prepare) return;
+
+  let endpoint = path;
+  let settledSuccess = response.status >= 200 && response.status < 300 && hasSettlementResponse(response) ? 1 : 0;
+  let paidAttempt = Object.hasOwn(TOOLS, path) && (response.status === 402 || settledSuccess) ? 1 : 0;
+  let freeRequest = FREE_COUNTER_PATHS.has(path) ? 1 : 0;
+  if (path === "/mcp") ({ endpoint, paidAttempt, settledSuccess, freeRequest } = await mcpCounterFlags(mcpRequest, mcpResponse));
+
+  await ensureCountersInitialized(db);
+  await db.prepare(COUNTER_UPSERT)
+    .bind(endpoint, paidAttempt, settledSuccess, freeRequest)
+    .run();
+}
+
+function scheduleCounter(c, path, response, mcpRequest) {
+  try {
+    const mcpResponse = path === "/mcp" ? response.clone() : null;
+    // Defer starting even the schema check until after the response exists.
+    const write = Promise.resolve()
+      .then(() => recordCounter(c.env?.DB, path, response, mcpRequest, mcpResponse))
+      .catch((error) => console.error("D1 counter write failed", error));
+
+    // app.fetch() in Node tests does not have an execution context; retaining
+    // the promise there keeps the request behavior identical while Workers
+    // uses the native background-task mechanism.
+    try {
+      c.executionCtx.waitUntil(write);
+    } catch {
+      void write;
+    }
+  } catch (error) {
+    console.error("D1 counter scheduling failed", error);
+  }
+}
+
+function isCounterPath(path) {
+  return TRACKED_COUNTER_PATHS.includes(path);
+}
+
+function emptyCounter() {
+  return {
+    requests: 0,
+    paid_attempts: 0,
+    settled_success: 0,
+    free_requests: 0,
+    first_seen: null,
+    last_seen: null,
+  };
+}
+
+async function readCounters(db) {
+  const rows = [];
+  if (db?.prepare) {
+    try {
+      await ensureCountersInitialized(db);
+      const result = await db.prepare(`
+        SELECT endpoint, requests, paid_attempts, settled_success, free_requests, first_seen, last_seen
+        FROM endpoint_counters
+      `).all();
+      rows.push(...(result.results ?? []));
+    } catch (error) {
+      // /stats remains a free, available health surface if D1 is temporarily down.
+      console.error("D1 counter read failed", error);
+    }
+  }
+
+  const byEndpoint = Object.fromEntries(TRACKED_COUNTER_PATHS.map((path) => [path, emptyCounter()]));
+  const counters = { total_requests: 0, paid_attempts: 0, settled_success: 0, free_requests: 0 };
+  for (const row of rows) {
+    const requests = Number(row.requests) || 0;
+    const paidAttempts = Number(row.paid_attempts) || 0;
+    const settledSuccess = Number(row.settled_success) || 0;
+    const freeRequests = Number(row.free_requests) || 0;
+    counters.total_requests += requests;
+    counters.paid_attempts += paidAttempts;
+    counters.settled_success += settledSuccess;
+    counters.free_requests += freeRequests;
+    byEndpoint[row.endpoint] = {
+      requests,
+      paid_attempts: paidAttempts,
+      settled_success: settledSuccess,
+      free_requests: freeRequests,
+      first_seen: row.first_seen,
+      last_seen: row.last_seen,
+    };
+  }
+  return { counters, byEndpoint };
+}
+
 const routes = {};
 for (const [path, t] of Object.entries(TOOLS)) {
   routes[`* ${path}`] = {
@@ -46,6 +253,25 @@ for (const [path, t] of Object.entries(TOOLS)) {
 }
 
 const app = new Hono();
+
+// This is registered before x402 so it observes both 402 requirements and the
+// final settled response, while the D1 work itself runs only after the response
+// has been produced.
+app.use("*", async (c, next) => {
+  // The request clone is made before the transport reads its JSON-RPC body; it
+  // is only parsed by the deferred counter task after the response is ready.
+  let mcpRequest = null;
+  if (c.req.path === "/mcp") {
+    try {
+      mcpRequest = c.req.raw.clone();
+    } catch (error) {
+      console.error("MCP counter request clone failed", error);
+    }
+  }
+  await next();
+  const path = c.req.path;
+  if (isCounterPath(path)) scheduleCounter(c, path, c.res, mcpRequest);
+});
 
 for (const path of Object.keys(TOOLS)) {
   app.use(path, async (c, next) => {
@@ -89,7 +315,18 @@ app.get("/health", (c) => c.json({
   ok: true, x402Version: 2, network: NETWORK, price: PRICE, facilitator: FACILITATOR,
   endpoints: Object.keys(TOOLS), mcp: `${ORIGIN}/mcp`,
 }));
-app.get("/stats", (c) => c.json({ ok: true, price: PRICE, paid: true, endpoints: Object.keys(TOOLS), note: "per-endpoint counters not yet persisted (D1 pending)" }));
+app.get("/stats", async (c) => {
+  const { counters, byEndpoint } = await readCounters(c.env?.DB);
+  return c.json({
+    ok: true,
+    price: PRICE,
+    paid: true,
+    endpoints: Object.keys(TOOLS),
+    counters,
+    by_endpoint: byEndpoint,
+    note: "counters persisted via D1",
+  });
+});
 
 // Free preview: classify what's wrong without returning the repaired payload.
 app.post("/diagnose", async (c) => {

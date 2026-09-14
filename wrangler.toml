@@ -2,6 +2,11 @@ name = "penniless-json-repair"
 main = "src/index.js"
 compatibility_date = "2026-09-01"
 
+[[d1_databases]]
+binding = "DB"
+database_name = "penniless-data-utilities-counters"
+database_id = "e699ef23-03c6-4d78-8c5c-e49c93813cd9"
+
 [vars]
 X402_NETWORK = "eip155:8453"
 X402_FACILITATOR = "https://facilitator.payai.network"
