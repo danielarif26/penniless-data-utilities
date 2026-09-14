@@ -211,7 +211,7 @@ export async function accountFromEnv() {
   return privateKeyToAccount(privateKey);
 }
 
-function makeDefaultSignerAdapter({ privateKey, account }) {
+function makeDefaultSignerAdapter({ privateKey, account, maxAmountBaseUnits }) {
   return {
     async sign(requirement) {
       const [{ x402Client, x402HTTPClient }, { registerExactEvmScheme }, { privateKeyToAccount }] = await Promise.all([
@@ -226,6 +226,18 @@ function makeDefaultSignerAdapter({ privateKey, account }) {
         ? privateKeyToAccount(validatePrivateKey(privateKey))
         : await accountFromEnv());
       const client = new x402Client();
+      // @x402/core 2.25 defaults to recognized assets only. Our Base USDC
+      // address can be treated as non-default by the scheme, so explicitly
+      // allow only the already-validated challenge asset and cap it at the
+      // caller's own USDC tolerance. This keeps the SDK's spend controls on
+      // instead of disabling them globally.
+      client.setSpendControls({
+        allowedAssets: [{
+          network: BASE_NETWORK,
+          asset: requirement.asset,
+          maxAmountPerPayment: String(maxAmountBaseUnits),
+        }],
+      });
       registerExactEvmScheme(client, { signer, networks: [BASE_NETWORK] });
       const httpClient = new x402HTTPClient(client);
       const payment = await httpClient.createPaymentPayload(requirement.paymentRequired);
@@ -334,7 +346,7 @@ export function createPennilessClient(options = {}) {
   }
   const normalizedBaseUrl = String(baseUrl).replace(/\/+$/, "");
   const toleranceBaseUnits = usdcToBaseUnits(priceToleranceUSDC);
-  const adapter = signerAdapter ?? makeDefaultSignerAdapter({ privateKey, account });
+  const adapter = signerAdapter ?? makeDefaultSignerAdapter({ privateKey, account, maxAmountBaseUnits: toleranceBaseUnits });
 
   const rawFetch = async (path, init = {}) => {
     const url = joinUrl(normalizedBaseUrl, path);
