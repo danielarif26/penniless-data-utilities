@@ -10,6 +10,7 @@ import {
 } from "./shared.js";
 import { createMcpHandler } from "./mcp.js";
 import { INTERNAL_PROBE_HEADER, hasPaymentHeader } from "./v1compat.js";
+import { renderPage, renderRobots, renderSitemap } from "./page.js";
 
 const facilitatorClient = new HTTPFacilitatorClient({ url: FACILITATOR });
 const resourceServer = new x402ResourceServer(facilitatorClient)
@@ -89,6 +90,9 @@ function ensureCountersInitialized(db) {
 }
 
 const FREE_COUNTER_PATHS = new Set([
+  // The tool page itself: its counter is how we find out whether anyone
+  // actually turns up, which no other number here answers.
+  "/",
   "/health",
   "/diagnose",
   "/stats",
@@ -375,6 +379,22 @@ app.post("/mcp", async (c) => {
     return c.json({ jsonrpc: "2.0", error: { code: -32603, message: "MCP request failed" }, id: null }, 500);
   }
 });
+
+// The human-facing tool. Everything it needs ships with the page, so it is
+// static, cacheable, and costs nothing per use — the paid API is for agents.
+app.get("/", (c) => c.html(renderPage(), 200, {
+  "cache-control": "public, max-age=600",
+}));
+
+app.get("/robots.txt", (c) => c.text(renderRobots(), 200, {
+  "content-type": "text/plain; charset=utf-8",
+  "cache-control": "public, max-age=86400",
+}));
+
+app.get("/sitemap.xml", (c) => c.text(renderSitemap(), 200, {
+  "content-type": "application/xml; charset=utf-8",
+  "cache-control": "public, max-age=86400",
+}));
 
 app.get("/health", (c) => c.json({
   ok: true, x402Version: 2, x402Versions: [1, 2], mppRestEnabled: Boolean(c.env?.MPP_SECRET_KEY), network: NETWORK, price: PRICE, facilitator: FACILITATOR,
