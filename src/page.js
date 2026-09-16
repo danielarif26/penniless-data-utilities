@@ -415,10 +415,10 @@ const DESCRIPTION =
   + "Fixes code fences, trailing commas, single quotes, unquoted keys, Python True/False/None, "
   + "comments and truncated output — and names every repair it made. Free, no signup, nothing uploaded.";
 
-// The origin is taken from the request rather than configuration, so the
-// canonical URL, sitemap and social tags follow the page onto a custom domain
-// without a redeploy. Pointing them at a different host than the one serving
-// the page is what tells a search engine to ignore it.
+// The origin these URLs use is resolved by canonicalOrigin() in index.js: the
+// requesting host by default, or CANONICAL_HOST once one domain is chosen. Two
+// hosts serving the same page, each claiming to be canonical, is duplicate
+// content that splits a ranking between them instead of building one.
 export function renderPage(origin) {
   return `<!doctype html>
 <html lang="en">

@@ -5,9 +5,19 @@ REST advertises native MPP and [x402](https://x402.org) v1 and v2 at once; MCP u
 tiers. Every tool is pure computation or a keyless public lookup — none of them
 call another AI model, so results are reproducible.
 
+- Web tool (free, no wallet): https://penniless-json-repair.sjaman.workers.dev/
 - Live endpoint (MCP): https://penniless-json-repair.sjaman.workers.dev/mcp
 - Live endpoint (REST): https://penniless-json-repair.sjaman.workers.dev
 - Discovery: `/health`, `/openapi.json`, `/llms.txt`, `/.well-known/x402`
+
+## Web tool
+
+`GET /` serves the JSON repair passes as a page. It compiles them into the
+browser and runs them there, so nothing is uploaded, no request reaches the
+Worker after load, and it works offline. Every pass that fires is named, which
+is the part a generic formatter does not tell you.
+
+The paid API below is the same nine passes for agents and scripts.
 
 ## Pricing
 
@@ -99,14 +109,16 @@ facilitator has settled.
 
 ```bash
 npm install
-npm test        # 140 tests, runs fully offline (facilitator + upstream are injected)
+npm test              # 171 tests, runs fully offline (facilitator + upstream are injected)
 npm run test:client   # 19 client tests
 npx wrangler dev
-npx wrangler deploy
+npm run ship          # pull, install, deploy
 ```
 
 Environment (set in `wrangler.toml`): `X402_NETWORK`, `X402_FACILITATOR`,
-`X402_PRICE`, `X402_PAY_TO`. Production also has an encrypted Cloudflare secret
+`X402_PRICE`, `X402_PAY_TO`, and optionally `CANONICAL_HOST` — set that to a
+custom domain once one points at the Worker, so it and the `workers.dev` host
+name the same canonical page instead of competing as duplicates. Production also has an encrypted Cloudflare secret
 `MPP_SECRET_KEY` used only to authenticate MPP challenges. Wallet private keys are
 never deployed to the Worker.
 

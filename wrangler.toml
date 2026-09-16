@@ -8,6 +8,10 @@ database_name = "penniless-data-utilities-counters"
 database_id = "e699ef23-03c6-4d78-8c5c-e49c93813cd9"
 
 [vars]
+# Set this to a custom domain once one is pointed at this Worker, so that
+# domain and the workers.dev one name the same canonical page instead of
+# competing as duplicates. Unset is correct while there is only one host.
+# CANONICAL_HOST = "example.com"
 X402_NETWORK = "eip155:8453"
 X402_FACILITATOR = "https://facilitator.payai.network"
 X402_PRICE = "$0.001"

@@ -380,18 +380,33 @@ app.post("/mcp", async (c) => {
   }
 });
 
+// Which host the page calls its own. Serving the same tool on workers.dev and
+// on a custom domain makes them competing duplicates unless both name the same
+// canonical URL, so setting CANONICAL_HOST in wrangler.toml picks the winner.
+// Left unset, each host speaks for itself, which is right while there is only
+// one. Only the page uses this; the paid API keeps the configured ORIGIN as its
+// stable identity, because payers and directories have already recorded it.
+function canonicalOrigin(c) {
+  const preferred = c.env?.CANONICAL_HOST;
+  if (typeof preferred === "string" && preferred.trim()) {
+    const host = preferred.trim().replace(/^https?:\/\//, "").replace(/\/+$/, "");
+    if (host) return `https://${host}`;
+  }
+  return new URL(c.req.url).origin;
+}
+
 // The human-facing tool. Everything it needs ships with the page, so it is
 // static, cacheable, and costs nothing per use — the paid API is for agents.
-app.get("/", (c) => c.html(renderPage(new URL(c.req.url).origin), 200, {
+app.get("/", (c) => c.html(renderPage(canonicalOrigin(c)), 200, {
   "cache-control": "public, max-age=600",
 }));
 
-app.get("/robots.txt", (c) => c.text(renderRobots(new URL(c.req.url).origin), 200, {
+app.get("/robots.txt", (c) => c.text(renderRobots(canonicalOrigin(c)), 200, {
   "content-type": "text/plain; charset=utf-8",
   "cache-control": "public, max-age=86400",
 }));
 
-app.get("/sitemap.xml", (c) => c.text(renderSitemap(new URL(c.req.url).origin), 200, {
+app.get("/sitemap.xml", (c) => c.text(renderSitemap(canonicalOrigin(c)), 200, {
   "content-type": "application/xml; charset=utf-8",
   "cache-control": "public, max-age=86400",
 }));

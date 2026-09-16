@@ -124,3 +124,28 @@ test("the page's own URLs follow whichever domain served it", async () => {
     assert.match(robots, new RegExp(`Sitemap: https://${host}/sitemap\\.xml`), `${host} robots`);
   }
 });
+
+// Once a domain is chosen, both hosts must name it as the real one, or the two
+// copies compete with each other in search instead of accumulating together.
+test("CANONICAL_HOST makes every host agree on one canonical URL", async () => {
+  const env = { CANONICAL_HOST: "jsontriage.example" };
+  for (const host of ["jsontriage.example", "penniless-json-repair.sjaman.workers.dev"]) {
+    const page = await (await app.fetch(new Request(`https://${host}/`), env)).text();
+    assert.match(page, /<link rel="canonical" href="https:\/\/jsontriage\.example\/"/, `${host} canonical`);
+    assert.match(page, /<meta property="og:url" content="https:\/\/jsontriage\.example\/"/, `${host} og:url`);
+
+    const sitemap = await (await app.fetch(new Request(`https://${host}/sitemap.xml`), env)).text();
+    assert.match(sitemap, /<loc>https:\/\/jsontriage\.example\/<\/loc>/, `${host} sitemap`);
+  }
+});
+
+test("a CANONICAL_HOST is accepted however it is written, and ignored when blank", async () => {
+  for (const written of ["jsontriage.example", "https://jsontriage.example", "jsontriage.example/", "  jsontriage.example  "]) {
+    const page = await (await app.fetch(new Request("https://other.example/"), { CANONICAL_HOST: written })).text();
+    assert.match(page, /<link rel="canonical" href="https:\/\/jsontriage\.example\/"/, `accepts ${JSON.stringify(written)}`);
+  }
+  for (const blank of ["", "   ", undefined]) {
+    const page = await (await app.fetch(new Request("https://other.example/"), { CANONICAL_HOST: blank })).text();
+    assert.match(page, /<link rel="canonical" href="https:\/\/other\.example\/"/, "falls back to the requesting host");
+  }
+});
