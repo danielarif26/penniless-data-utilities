@@ -62,9 +62,9 @@ export function isV1Payment(request) {
 
 // Rebuilds the request only when something actually has to change, so the
 // common path keeps the original object and never buffers a body.
-export async function normalizeRequest(request) {
+export async function normalizeRequest(request, paidPath = true) {
   const spoofed = request.headers.has(INTERNAL_PROBE_HEADER);
-  const v1 = isV1Payment(request);
+  const v1 = paidPath && isV1Payment(request);
   if (!spoofed && !v1) return { request, body: null, isV1: false };
 
   const body = request.method === "GET" || request.method === "HEAD"

@@ -1,5 +1,6 @@
 import app from "./index.js";
 import { buildAgentManifest } from "./agent-manifest.js";
+import { TOOLS } from "./shared.js";
 import {
   addV1PaymentRequiredBody, matchRequirement, mirrorV1Settlement, normalizeRequest,
   probeRequest, readPaymentRequired, readV1Payment, upgradeToV2,
@@ -19,7 +20,10 @@ export default {
       });
     }
 
-    const { request: incoming, body, isV1 } = await normalizeRequest(request);
+    // Only a paid path has terms to translate. Anywhere else an X-PAYMENT is
+    // meaningless, and probing for a requirement that cannot exist would run
+    // the free handler a second time for nothing.
+    const { request: incoming, body, isV1 } = await normalizeRequest(request, Object.hasOwn(TOOLS, url.pathname));
     if (!isV1) return addV1PaymentRequiredBody(await app.fetch(incoming, env, executionCtx));
 
     // A v1 payer: read back the requirement the paywall is advertising right

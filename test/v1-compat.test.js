@@ -177,3 +177,29 @@ test("every paid path answers a v1 client with a usable offer", async () => {
     assert.ok(body.accepts[0].resource.endsWith(path), `${path} resource url`);
   }
 });
+
+test("an X-PAYMENT aimed at a free path is not translated and does not re-run the handler", async () => {
+  let calls = 0;
+  const counted = new Request("http://localhost/diagnose", {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-payment": "irrelevant" },
+    body: JSON.stringify({ input: "{a:1,}" }),
+  });
+  const db = {
+    prepare(sql) {
+      return {
+        bind: (...args) => ({ run: async () => { if (args.includes("/diagnose")) calls += 1; } }),
+        run: async () => {},
+      };
+    },
+  };
+  const pending = [];
+  const response = await worker.fetch(counted, { DB: db }, {
+    waitUntil: (promise) => pending.push(Promise.resolve(promise)),
+  });
+  await Promise.allSettled(pending);
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).parsesNow, false);
+  // One execution, not a probe plus a replay.
+  assert.equal(calls, 1);
+});
