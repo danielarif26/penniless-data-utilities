@@ -4,6 +4,7 @@ import { HTTPFacilitatorClient } from "@x402/core/server";
 import { ExactEvmSchemeV1 } from "@x402/evm/v1";
 import { privateKeyToAccount } from "viem/accounts";
 import worker from "../src/entry.js";
+import { hasPaymentHeader, probeRequest } from "../src/v1compat.js";
 import { NETWORK, PAY_TO, PRICE_ATOMIC, TOOLS, USDC_BASE } from "../src/shared.js";
 
 // The facilitator is replaced, but every requirement and every signature below
@@ -273,4 +274,48 @@ test("a forged envelope can neither be served nor tamper with the terms verified
     HTTPFacilitatorClient.prototype.verify = permissiveVerify;
     HTTPFacilitatorClient.prototype.settle = permissiveSettle;
   }
+});
+
+// The probe's response is thrown away. Any payment credential left on it would
+// be verified and settled against a result nobody receives -- on the MPP rail
+// that is a real on-chain transfer, and the caller is then told to send only
+// one credential, having already paid.
+test("the probe carries no payment credential of any rail", () => {
+  const probe = probeRequest(new Request("http://localhost/repair/json", {
+    method: "POST",
+    headers: {
+      "x-payment": "v1-credential",
+      "payment-signature": "v2-credential",
+      authorization: "Payment mpp-credential",
+      "content-type": "application/json",
+    },
+  }));
+  assert.equal(probe.headers.get("x-payment"), null);
+  assert.equal(probe.headers.get("payment-signature"), null);
+  assert.equal(probe.headers.get("authorization"), null);
+  assert.equal(probe.headers.get("x-pdu-internal-probe"), "1");
+  // Everything unrelated to payment still describes the same request.
+  assert.equal(probe.headers.get("content-type"), "application/json");
+  assert.equal(probe.method, "POST");
+});
+
+test("a non-payment Authorization header is left alone", () => {
+  const probe = probeRequest(new Request("http://localhost/repair/json", {
+    method: "POST",
+    headers: { authorization: "Bearer not-a-payment", "x-payment": "v1" },
+  }));
+  assert.equal(probe.headers.get("authorization"), "Bearer not-a-payment");
+});
+
+test("an MPP credential counts as an attempt to pay", () => {
+  const mpp = new Request("http://localhost/repair/json", {
+    method: "POST",
+    headers: { authorization: "Payment mpp-credential" },
+  });
+  assert.equal(hasPaymentHeader(mpp), true);
+  const bearer = new Request("http://localhost/repair/json", {
+    method: "POST",
+    headers: { authorization: "Bearer session-token" },
+  });
+  assert.equal(hasPaymentHeader(bearer), false);
 });

@@ -24,6 +24,9 @@
 export const INTERNAL_PROBE_HEADER = "x-pdu-internal-probe";
 
 const V1_PAYMENT_HEADER = "x-payment";
+// Native MPP carries its payment credential as `Authorization: Payment <...>`.
+const MPP_CREDENTIAL_HEADER = "authorization";
+const MPP_CREDENTIAL_SCHEME = /^payment\s/i;
 const V1_SETTLEMENT_HEADER = "x-payment-response";
 const V2_PAYMENT_HEADER = "payment-signature";
 const V2_REQUIRED_HEADER = "payment-required";
@@ -50,8 +53,14 @@ function encodeBase64Json(value) {
   return btoa(binary);
 }
 
+export function hasMppCredential(request) {
+  return MPP_CREDENTIAL_SCHEME.test(request.headers.get(MPP_CREDENTIAL_HEADER) ?? "");
+}
+
 export function hasPaymentHeader(request) {
-  return request.headers.has(V2_PAYMENT_HEADER) || request.headers.has(V1_PAYMENT_HEADER);
+  return request.headers.has(V2_PAYMENT_HEADER)
+    || request.headers.has(V1_PAYMENT_HEADER)
+    || hasMppCredential(request);
 }
 
 // A v1 payer is one that sent X-PAYMENT and nothing a v2 server would read.
@@ -82,10 +91,16 @@ export async function normalizeRequest(request, paidPath = true) {
 // Asks the paywall what it currently requires, without spending the real
 // request. Routes are registered for every method, so a bodiless request to
 // the same URL returns the same requirement the real call would be judged by.
+//
+// The probe must carry no payment credential of any rail. It only needs the
+// 402 challenge, and its response is discarded — an MPP credential left on it
+// would be verified and settled on-chain against a result nobody receives,
+// charging the caller for nothing.
 export function probeRequest(request) {
   const headers = new Headers(request.headers);
   headers.delete(V1_PAYMENT_HEADER);
   headers.delete(V2_PAYMENT_HEADER);
+  if (hasMppCredential(request)) headers.delete(MPP_CREDENTIAL_HEADER);
   headers.set(INTERNAL_PROBE_HEADER, "1");
   return new Request(request.url, { method: request.method, headers });
 }
