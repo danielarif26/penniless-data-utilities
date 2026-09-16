@@ -397,7 +397,21 @@ function canonicalOrigin(c) {
 
 // The human-facing tool. Everything it needs ships with the page, so it is
 // static, cacheable, and costs nothing per use — the paid API is for agents.
-app.get("/", (c) => c.html(renderPage(canonicalOrigin(c)), 200, {
+// Search Console's HTML-file method: it fetches the exact filename it issued
+// and expects that name echoed back. Only the issued name is answered, so this
+// cannot be used to probe for arbitrary files.
+app.get("/:file{google[A-Za-z0-9_-]+\\.html}", (c) => {
+  const issued = c.env?.GOOGLE_SITE_VERIFICATION;
+  const asked = c.req.param("file");
+  if (typeof issued !== "string" || issued.toLowerCase() !== asked.toLowerCase()) {
+    return c.notFound();
+  }
+  return c.text(`google-site-verification: ${issued}\n`, 200, {
+    "content-type": "text/html; charset=utf-8",
+  });
+});
+
+app.get("/", (c) => c.html(renderPage(canonicalOrigin(c), c.env?.GOOGLE_SITE_VERIFICATION), 200, {
   "cache-control": "public, max-age=600",
 }));
 

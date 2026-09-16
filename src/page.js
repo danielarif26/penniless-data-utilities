@@ -419,7 +419,17 @@ const DESCRIPTION =
 // requesting host by default, or CANONICAL_HOST once one domain is chosen. Two
 // hosts serving the same page, each claiming to be canonical, is duplicate
 // content that splits a ranking between them instead of building one.
-export function renderPage(origin) {
+// Search Console's HTML-tag method looks for this in the head. It is inert
+// markup: it proves ownership and does nothing else.
+function verificationMeta(token) {
+  if (typeof token !== "string") return "";
+  const value = token.trim();
+  if (!value || /^google[a-z0-9_-]+\.html$/i.test(value)) return "";
+  if (!/^[A-Za-z0-9_-]{20,100}$/.test(value)) return "";
+  return `<meta name="google-site-verification" content="${value}">\n`;
+}
+
+export function renderPage(origin, verificationToken) {
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -427,6 +437,7 @@ export function renderPage(origin) {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${TITLE}</title>
 <meta name="description" content="${DESCRIPTION}">
+${verificationMeta(verificationToken)}
 <link rel="canonical" href="${origin}/">
 <meta property="og:type" content="website">
 <meta property="og:title" content="${TITLE}">

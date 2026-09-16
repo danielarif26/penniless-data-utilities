@@ -112,12 +112,15 @@ npm install
 npm test              # 171 tests, runs fully offline (facilitator + upstream are injected)
 npm run test:client   # 19 client tests
 npx wrangler dev
-npm run domain example.com   # point a custom domain at the Worker
-npm run ship                 # pull, install, deploy
+npm run domain example.com       # point a custom domain at the Worker
+npm run verify-google <token>    # prove ownership to Google Search Console
+npm run ship                     # pull, install, deploy
 ```
 
 Environment (set in `wrangler.toml`): `X402_NETWORK`, `X402_FACILITATOR`,
-`X402_PRICE`, `X402_PAY_TO`, and optionally `CANONICAL_HOST` — set that to a
+`X402_PRICE`, `X402_PAY_TO`, optionally `GOOGLE_SITE_VERIFICATION` (set by
+`npm run verify-google`; supports both Search Console's HTML-tag and HTML-file
+methods), and optionally `CANONICAL_HOST` — set that to a
 custom domain once one points at the Worker, so it and the `workers.dev` host
 name the same canonical page instead of competing as duplicates. Production also has an encrypted Cloudflare secret
 `MPP_SECRET_KEY` used only to authenticate MPP challenges. Wallet private keys are
