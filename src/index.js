@@ -382,16 +382,16 @@ app.post("/mcp", async (c) => {
 
 // The human-facing tool. Everything it needs ships with the page, so it is
 // static, cacheable, and costs nothing per use — the paid API is for agents.
-app.get("/", (c) => c.html(renderPage(), 200, {
+app.get("/", (c) => c.html(renderPage(new URL(c.req.url).origin), 200, {
   "cache-control": "public, max-age=600",
 }));
 
-app.get("/robots.txt", (c) => c.text(renderRobots(), 200, {
+app.get("/robots.txt", (c) => c.text(renderRobots(new URL(c.req.url).origin), 200, {
   "content-type": "text/plain; charset=utf-8",
   "cache-control": "public, max-age=86400",
 }));
 
-app.get("/sitemap.xml", (c) => c.text(renderSitemap(), 200, {
+app.get("/sitemap.xml", (c) => c.text(renderSitemap(new URL(c.req.url).origin), 200, {
   "content-type": "application/xml; charset=utf-8",
   "cache-control": "public, max-age=86400",
 }));

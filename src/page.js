@@ -9,7 +9,7 @@
 // two are kept honest by test/page.test.js, which extracts this copy, runs it
 // and the server module over the same inputs, and fails if they ever disagree.
 
-import { ORIGIN, PRICE } from "./shared.js";
+import { PRICE } from "./shared.js";
 
 const CLIENT_REPAIR = String.raw`
 function tryParse(s) {
@@ -415,7 +415,11 @@ const DESCRIPTION =
   + "Fixes code fences, trailing commas, single quotes, unquoted keys, Python True/False/None, "
   + "comments and truncated output — and names every repair it made. Free, no signup, nothing uploaded.";
 
-export function renderPage() {
+// The origin is taken from the request rather than configuration, so the
+// canonical URL, sitemap and social tags follow the page onto a custom domain
+// without a redeploy. Pointing them at a different host than the one serving
+// the page is what tells a search engine to ignore it.
+export function renderPage(origin) {
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -423,11 +427,11 @@ export function renderPage() {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${TITLE}</title>
 <meta name="description" content="${DESCRIPTION}">
-<link rel="canonical" href="${ORIGIN}/">
+<link rel="canonical" href="${origin}/">
 <meta property="og:type" content="website">
 <meta property="og:title" content="${TITLE}">
 <meta property="og:description" content="${DESCRIPTION}">
-<meta property="og:url" content="${ORIGIN}/">
+<meta property="og:url" content="${origin}/">
 <meta name="twitter:card" content="summary">
 <meta name="twitter:title" content="${TITLE}">
 <meta name="twitter:description" content="${DESCRIPTION}">
@@ -436,7 +440,7 @@ export function renderPage() {
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap">
 <script type="application/ld+json">
-{"@context":"https://schema.org","@type":"WebApplication","name":"JSON Triage","url":"${ORIGIN}/","applicationCategory":"DeveloperApplication","operatingSystem":"Any","offers":{"@type":"Offer","price":"0","priceCurrency":"USD"},"description":"${DESCRIPTION}"}
+{"@context":"https://schema.org","@type":"WebApplication","name":"JSON Triage","url":"${origin}/","applicationCategory":"DeveloperApplication","operatingSystem":"Any","offers":{"@type":"Offer","price":"0","priceCurrency":"USD"},"description":"${DESCRIPTION}"}
 </script>
 <style>${STYLES}</style>
 </head>
@@ -511,18 +515,18 @@ ${UI_SCRIPT}
 `;
 }
 
-export function renderRobots() {
+export function renderRobots(origin) {
   return `User-agent: *
 Allow: /
 
-Sitemap: ${ORIGIN}/sitemap.xml
+Sitemap: ${origin}/sitemap.xml
 `;
 }
 
-export function renderSitemap() {
+export function renderSitemap(origin) {
   return `<?xml version="1.0" encoding="UTF-8"?>
 <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
-  <url><loc>${ORIGIN}/</loc><changefreq>weekly</changefreq><priority>1.0</priority></url>
+  <url><loc>${origin}/</loc><changefreq>weekly</changefreq><priority>1.0</priority></url>
 </urlset>
 `;
 }
