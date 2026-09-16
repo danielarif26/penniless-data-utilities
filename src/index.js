@@ -9,6 +9,8 @@ import {
   validateArgs,
 } from "./shared.js";
 import { createMcpHandler } from "./mcp.js";
+import { INTERNAL_PROBE_HEADER, hasPaymentHeader } from "./v1compat.js";
+import { renderPage, renderRobots, renderSitemap } from "./page.js";
 
 const facilitatorClient = new HTTPFacilitatorClient({ url: FACILITATOR });
 const resourceServer = new x402ResourceServer(facilitatorClient)
@@ -43,21 +45,26 @@ const COUNTER_SCHEMA = `
     paid_attempts INTEGER NOT NULL DEFAULT 0,
     settled_success INTEGER NOT NULL DEFAULT 0,
     free_requests INTEGER NOT NULL DEFAULT 0,
+    challenges INTEGER NOT NULL DEFAULT 0,
     first_seen TEXT NOT NULL,
     last_seen TEXT NOT NULL
   )
 `;
 const COUNTER_UPSERT = `
   INSERT INTO endpoint_counters (
-    endpoint, requests, paid_attempts, settled_success, free_requests, first_seen, last_seen
-  ) VALUES (?, 1, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+    endpoint, requests, paid_attempts, settled_success, free_requests, challenges, first_seen, last_seen
+  ) VALUES (?, 1, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
   ON CONFLICT(endpoint) DO UPDATE SET
     requests = requests + 1,
     paid_attempts = paid_attempts + excluded.paid_attempts,
     settled_success = settled_success + excluded.settled_success,
     free_requests = free_requests + excluded.free_requests,
+    challenges = challenges + excluded.challenges,
     last_seen = CURRENT_TIMESTAMP
 `;
+// `challenges` was added after the table shipped, so an existing deployment
+// has to grow the column before the upsert above can bind it.
+const COUNTER_ADD_CHALLENGES = "ALTER TABLE endpoint_counters ADD COLUMN challenges INTEGER NOT NULL DEFAULT 0";
 let countersInitPromise = null;
 let countersInitDatabase = null;
 
@@ -66,6 +73,11 @@ function ensureCountersInitialized(db) {
   if (countersInitDatabase === db && countersInitPromise) return countersInitPromise;
   countersInitDatabase = db;
   countersInitPromise = db.prepare(COUNTER_SCHEMA).run()
+    .then(() => db.prepare(COUNTER_ADD_CHALLENGES).run().catch((error) => {
+      // Already present on every run after the first, which is not a failure.
+      if (/duplicate column/i.test(String(error?.message ?? error))) return;
+      throw error;
+    }))
     .then(() => true)
     .catch((error) => {
       if (countersInitDatabase === db) {
@@ -78,6 +90,9 @@ function ensureCountersInitialized(db) {
 }
 
 const FREE_COUNTER_PATHS = new Set([
+  // The tool page itself: its counter is how we find out whether anyone
+  // actually turns up, which no other number here answers.
+  "/",
   "/health",
   "/diagnose",
   "/stats",
@@ -120,7 +135,7 @@ function parseMcpResponsePayloads(body) {
 }
 
 async function mcpCounterFlags(request, response) {
-  const flags = { endpoint: "/mcp", paidAttempt: 0, settledSuccess: 0, freeRequest: 0 };
+  const flags = { endpoint: "/mcp", paidAttempt: 0, settledSuccess: 0, freeRequest: 0, challenge: 0 };
   try {
     const requestBody = await request.json();
     if (requestBody?.method === "tools/list") {
@@ -132,10 +147,10 @@ async function mcpCounterFlags(request, response) {
     const tool = Object.entries(TOOLS).find(([, value]) => value.mcpName === requestBody?.params?.name);
     if (!tool) return flags;
     flags.endpoint = tool[0];
-    // An MCP tools/call maps to its matching paid REST endpoint. Unlike REST,
-    // its payment-required result is JSON-RPC 200, so the attempt is known from
-    // the call itself rather than an HTTP 402 status.
-    flags.paidAttempt = 1;
+    // An MCP tools/call maps to its matching paid REST endpoint. A call is a
+    // paid attempt only when it actually carried a payment; one that did not
+    // is a challenge, which is what the unpaid call is answered with.
+    flags.paidAttempt = requestBody?.params?._meta?.["x402/payment"] ? 1 : 0;
 
     const payloads = parseMcpResponsePayloads(await response.text());
     flags.settledSuccess = response.status >= 200 && response.status < 300
@@ -146,6 +161,7 @@ async function mcpCounterFlags(request, response) {
       })
       ? 1
       : 0;
+    flags.challenge = flags.settledSuccess ? 0 : 1;
   } catch (error) {
     // A transport body that cannot be read is still counted as a request below.
     console.error("MCP counter classification failed", error);
@@ -153,27 +169,34 @@ async function mcpCounterFlags(request, response) {
   return flags;
 }
 
-async function recordCounter(db, path, response, mcpRequest, mcpResponse) {
+async function recordCounter(db, path, response, mcpRequest, mcpResponse, offeredPayment) {
   if (!db?.prepare) return;
 
   let endpoint = path;
+  const paidPath = Object.hasOwn(TOOLS, path);
   let settledSuccess = response.status >= 200 && response.status < 300 && hasSettlementResponse(response) ? 1 : 0;
-  let paidAttempt = Object.hasOwn(TOOLS, path) && (response.status === 402 || settledSuccess) ? 1 : 0;
+  // A 402 is a challenge the server issued, not interest in paying: any
+  // crawler that touches a paid path draws one. Only a request that actually
+  // carried a payment counts as an attempt to buy.
+  let challenge = paidPath && response.status === 402 ? 1 : 0;
+  let paidAttempt = paidPath && (offeredPayment || settledSuccess) ? 1 : 0;
   let freeRequest = FREE_COUNTER_PATHS.has(path) ? 1 : 0;
-  if (path === "/mcp") ({ endpoint, paidAttempt, settledSuccess, freeRequest } = await mcpCounterFlags(mcpRequest, mcpResponse));
+  if (path === "/mcp") {
+    ({ endpoint, paidAttempt, settledSuccess, freeRequest, challenge } = await mcpCounterFlags(mcpRequest, mcpResponse));
+  }
 
   await ensureCountersInitialized(db);
   await db.prepare(COUNTER_UPSERT)
-    .bind(endpoint, paidAttempt, settledSuccess, freeRequest)
+    .bind(endpoint, paidAttempt, settledSuccess, freeRequest, challenge)
     .run();
 }
 
-function scheduleCounter(c, path, response, mcpRequest) {
+function scheduleCounter(c, path, response, mcpRequest, offeredPayment) {
   try {
     const mcpResponse = path === "/mcp" ? response.clone() : null;
     // Defer starting even the schema check until after the response exists.
     const write = Promise.resolve()
-      .then(() => recordCounter(c.env?.DB, path, response, mcpRequest, mcpResponse))
+      .then(() => recordCounter(c.env?.DB, path, response, mcpRequest, mcpResponse, offeredPayment))
       .catch((error) => console.error("D1 counter write failed", error));
 
     // app.fetch() in Node tests does not have an execution context; retaining
@@ -199,6 +222,7 @@ function emptyCounter() {
     paid_attempts: 0,
     settled_success: 0,
     free_requests: 0,
+    challenges: 0,
     first_seen: null,
     last_seen: null,
   };
@@ -210,7 +234,7 @@ async function readCounters(db) {
     try {
       await ensureCountersInitialized(db);
       const result = await db.prepare(`
-        SELECT endpoint, requests, paid_attempts, settled_success, free_requests, first_seen, last_seen
+        SELECT endpoint, requests, paid_attempts, settled_success, free_requests, challenges, first_seen, last_seen
         FROM endpoint_counters
       `).all();
       rows.push(...(result.results ?? []));
@@ -221,21 +245,24 @@ async function readCounters(db) {
   }
 
   const byEndpoint = Object.fromEntries(TRACKED_COUNTER_PATHS.map((path) => [path, emptyCounter()]));
-  const counters = { total_requests: 0, paid_attempts: 0, settled_success: 0, free_requests: 0 };
+  const counters = { total_requests: 0, paid_attempts: 0, settled_success: 0, free_requests: 0, challenges: 0 };
   for (const row of rows) {
     const requests = Number(row.requests) || 0;
     const paidAttempts = Number(row.paid_attempts) || 0;
     const settledSuccess = Number(row.settled_success) || 0;
     const freeRequests = Number(row.free_requests) || 0;
+    const challenges = Number(row.challenges) || 0;
     counters.total_requests += requests;
     counters.paid_attempts += paidAttempts;
     counters.settled_success += settledSuccess;
     counters.free_requests += freeRequests;
+    counters.challenges += challenges;
     byEndpoint[row.endpoint] = {
       requests,
       paid_attempts: paidAttempts,
       settled_success: settledSuccess,
       free_requests: freeRequests,
+      challenges,
       first_seen: row.first_seen,
       last_seen: row.last_seen,
     };
@@ -266,7 +293,7 @@ app.use("*", cors({
   origin: "*",
   allowMethods: ["GET", "HEAD", "POST", "PUT", "DELETE", "OPTIONS"],
   allowHeaders: ["Content-Type", "Payment-Signature", "X-PAYMENT", "Authorization"],
-  exposeHeaders: ["PAYMENT-REQUIRED", "PAYMENT-RESPONSE", "WWW-Authenticate", "Payment-Receipt"],
+  exposeHeaders: ["PAYMENT-REQUIRED", "PAYMENT-RESPONSE", "WWW-Authenticate", "Payment-Receipt", "X-PAYMENT-RESPONSE"],
   maxAge: 86400,
 }));
 
@@ -284,9 +311,13 @@ app.use("*", async (c, next) => {
       console.error("MCP counter request clone failed", error);
     }
   }
+  // Read before the handler runs: the payment header is what distinguishes a
+  // caller trying to buy from one that merely tripped the paywall.
+  const offeredPayment = hasPaymentHeader(c.req.raw);
+  const isInternalProbe = c.req.raw.headers.has(INTERNAL_PROBE_HEADER);
   await next();
   const path = c.req.path;
-  if (isCounterPath(path)) scheduleCounter(c, path, c.res, mcpRequest);
+  if (isCounterPath(path) && !isInternalProbe) scheduleCounter(c, path, c.res, mcpRequest, offeredPayment);
 });
 
 for (const path of Object.keys(TOOLS)) {
@@ -349,8 +380,53 @@ app.post("/mcp", async (c) => {
   }
 });
 
+// Which host the page calls its own. Serving the same tool on workers.dev and
+// on a custom domain makes them competing duplicates unless both name the same
+// canonical URL, so setting CANONICAL_HOST in wrangler.toml picks the winner.
+// Left unset, each host speaks for itself, which is right while there is only
+// one. Only the page uses this; the paid API keeps the configured ORIGIN as its
+// stable identity, because payers and directories have already recorded it.
+function canonicalOrigin(c) {
+  const preferred = c.env?.CANONICAL_HOST;
+  if (typeof preferred === "string" && preferred.trim()) {
+    const host = preferred.trim().replace(/^https?:\/\//, "").replace(/\/+$/, "");
+    if (host) return `https://${host}`;
+  }
+  return new URL(c.req.url).origin;
+}
+
+// The human-facing tool. Everything it needs ships with the page, so it is
+// static, cacheable, and costs nothing per use — the paid API is for agents.
+// Search Console's HTML-file method: it fetches the exact filename it issued
+// and expects that name echoed back. Only the issued name is answered, so this
+// cannot be used to probe for arbitrary files.
+app.get("/:file{google[A-Za-z0-9_-]+\\.html}", (c) => {
+  const issued = c.env?.GOOGLE_SITE_VERIFICATION;
+  const asked = c.req.param("file");
+  if (typeof issued !== "string" || issued.toLowerCase() !== asked.toLowerCase()) {
+    return c.notFound();
+  }
+  return c.text(`google-site-verification: ${issued}\n`, 200, {
+    "content-type": "text/html; charset=utf-8",
+  });
+});
+
+app.get("/", (c) => c.html(renderPage(canonicalOrigin(c), c.env?.GOOGLE_SITE_VERIFICATION), 200, {
+  "cache-control": "public, max-age=600",
+}));
+
+app.get("/robots.txt", (c) => c.text(renderRobots(canonicalOrigin(c)), 200, {
+  "content-type": "text/plain; charset=utf-8",
+  "cache-control": "public, max-age=86400",
+}));
+
+app.get("/sitemap.xml", (c) => c.text(renderSitemap(canonicalOrigin(c)), 200, {
+  "content-type": "application/xml; charset=utf-8",
+  "cache-control": "public, max-age=86400",
+}));
+
 app.get("/health", (c) => c.json({
-  ok: true, x402Version: 2, mppRestEnabled: Boolean(c.env?.MPP_SECRET_KEY), network: NETWORK, price: PRICE, facilitator: FACILITATOR,
+  ok: true, x402Version: 2, x402Versions: [1, 2], mppRestEnabled: Boolean(c.env?.MPP_SECRET_KEY), network: NETWORK, price: PRICE, facilitator: FACILITATOR,
   endpoints: Object.keys(TOOLS), mcp: `${ORIGIN}/mcp`,
 }));
 app.get("/stats", async (c) => {
@@ -363,6 +439,13 @@ app.get("/stats", async (c) => {
     counters,
     by_endpoint: byEndpoint,
     note: "counters persisted via D1",
+    counter_semantics: {
+      requests: "every request to a tracked path, including crawlers",
+      challenges: "402 payment-required responses issued",
+      paid_attempts: "requests that actually carried a payment payload",
+      settled_success: "payments the facilitator settled — the only revenue signal",
+      caveat: "rows recorded before the challenges column existed counted every 402 as a paid_attempt, so paid_attempts is overstated for that period",
+    },
   });
 });
 
@@ -396,6 +479,8 @@ app.get("/.well-known/402index-verify.txt", (c) =>
 app.get("/.well-known/x402", (c) => c.json({
   version: 1,
   x402Version: 2,
+  // REST accepts v1 (X-PAYMENT, requirements in the 402 body) as well as v2.
+  x402Versions: [1, 2],
   name: "Penniless Data Utilities",
   description: SEMANTIC,
   openapi: `${ORIGIN}/openapi.json`,
@@ -429,6 +514,8 @@ app.get("/.well-known/x402", (c) => c.json({
 app.get("/llms.txt", (c) => c.text(`${ORIGIN} - Penniless Data Utilities
 
 All paid endpoints: x402 v2 / MPP, ${PRICE} USDC on Base (eip155:8453), payTo ${PAY_TO}.
+REST also accepts x402 v1: the 402 body carries the v1 requirements (network "base") and
+payment goes back in X-PAYMENT. Both rails price and settle identically.
 
 MCP (streamable HTTP): ${ORIGIN}/mcp - the same nine tools over x402 v2, priced per tools/call.
 
@@ -459,12 +546,12 @@ app.get("/openapi.json", (c) => {
       post: {
         summary: t.serviceName,
         description: t.desc,
-        "x-payment-info": { price: { mode: "fixed", currency: "USD", amount: PRICE_USD }, protocols: [{ x402: {} }, { mpp: {} }] },
+        "x-payment-info": { price: { mode: "fixed", currency: "USD", amount: PRICE_USD }, protocols: [{ x402: { versions: [1, 2] } }, { mpp: {} }] },
         requestBody: { required: true, content: { "application/json": { schema: t.schema } } },
         responses: {
           "200": { description: "Result.", content: { "application/json": { schema: { type: "object" } } } },
           "400": { description: "Invalid request body." },
-          "402": { description: "Payment required (x402 v2 / MPP)." },
+          "402": { description: "Payment required. Body carries x402 v1 requirements; PAYMENT-REQUIRED header carries x402 v2 / MPP." },
           "413": { description: "Input exceeds maxBytes." },
         },
       },
@@ -479,7 +566,7 @@ app.get("/openapi.json", (c) => {
       title: "Penniless Data Utilities",
       description: SEMANTIC,
       version: "3.1.0",
-      "x-guidance": "Deterministic data and lookup tools for agents. Use /repair/json when JSON.parse rejects near-JSON from an LLM; /yaml/tojson to turn YAML config into JSON; /cron/nextrun to resolve a cron schedule; /diff to compare two texts; /text/extract to pull links/emails/headings from HTML; /domain/whois and /dns/lookup for domain registration and DNS records; /github/repo-stats for repository popularity; /email/validate to check syntax plus MX deliverability. Call the REST paths directly over x402 v2 or native MPP, or connect an MCP client to /mcp over x402 v2. Paid REST endpoints return HTTP 402 advertising both rails; MCP tools/call uses x402 v2. /diagnose and /health are free.",
+      "x-guidance": "Deterministic data and lookup tools for agents. Use /repair/json when JSON.parse rejects near-JSON from an LLM; /yaml/tojson to turn YAML config into JSON; /cron/nextrun to resolve a cron schedule; /diff to compare two texts; /text/extract to pull links/emails/headings from HTML; /domain/whois and /dns/lookup for domain registration and DNS records; /github/repo-stats for repository popularity; /email/validate to check syntax plus MX deliverability. Call the REST paths directly over x402 v2 or native MPP, or connect an MCP client to /mcp over x402 v2. Paid REST endpoints return HTTP 402 advertising every rail at once: x402 v1 requirements in the JSON body (pay with X-PAYMENT), x402 v2 and MPP in the PAYMENT-REQUIRED header (pay with PAYMENT-SIGNATURE). MCP tools/call uses x402 v2. /diagnose and /health are free.",
       "x-payment-server": {
         scheme: "exact",
         network: NETWORK,

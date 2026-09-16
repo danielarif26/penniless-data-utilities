@@ -26,7 +26,7 @@ class FakeD1 {
   }
 
   apply(sql, args) {
-    if (/^\s*create\s+table/i.test(sql)) return;
+    if (/^\s*create\s+table/i.test(sql) || /^\s*alter\s+table/i.test(sql)) return;
 
     const endpoint = args.find((arg) => typeof arg === "string" && arg.startsWith("/"));
     if (!endpoint || !sql.toLowerCase().includes("endpoint")) return;
@@ -37,6 +37,7 @@ class FakeD1 {
       paid_attempts: 0,
       settled_success: 0,
       free_requests: 0,
+      challenges: 0,
       first_seen: null,
       last_seen: null,
     };
@@ -45,9 +46,9 @@ class FakeD1 {
     const event = args.find((arg) => typeof arg === "string" && !arg.startsWith("/") && !/^\d{4}-\d{2}-\d{2}t/i.test(arg));
 
     // Support both the compact four-delta upsert and event-oriented updates.
-    let [requests, paid, settled, free] = numbers;
-    if (numbers.length === 3) [paid, settled, free] = numbers;
-    if (numbers.length < 4) requests = 1;
+    let [requests, paid, settled, free, challenges] = numbers;
+    if (numbers.length === 4) [paid, settled, free, challenges] = numbers;
+    if (numbers.length < 5) requests = 1;
     if (event) {
       if (/paid[_ -]?attempt/i.test(event)) paid = 1;
       else if (/settled|success/i.test(event)) settled = 1;
@@ -57,11 +58,13 @@ class FakeD1 {
     if (/paid_attempts\s*=\s*paid_attempts\s*\+\s*1/i.test(sql)) paid = 1;
     if (/settled_success\s*=\s*settled_success\s*\+\s*1/i.test(sql)) settled = 1;
     if (/requests\s*=\s*requests\s*\+\s*1/i.test(sql)) requests = 1;
+    if (/challenges\s*=\s*challenges\s*\+\s*1/i.test(sql)) challenges = 1;
 
     row.requests += Number(requests) || 0;
     row.paid_attempts += Number(paid) || 0;
     row.settled_success += Number(settled) || 0;
     row.free_requests += Number(free) || 0;
+    row.challenges += Number(challenges) || 0;
     const timestamps = args.filter((arg) => typeof arg === "string" && /^\d{4}-\d{2}-\d{2}t/i.test(arg));
     const now = timestamps[0] ?? new Date().toISOString();
     row.first_seen ??= now;
@@ -78,6 +81,7 @@ class FakeD1 {
         paid_attempts: rows.reduce((sum, row) => sum + row.paid_attempts, 0),
         settled_success: rows.reduce((sum, row) => sum + row.settled_success, 0),
         free_requests: rows.reduce((sum, row) => sum + row.free_requests, 0),
+        challenges: rows.reduce((sum, row) => sum + row.challenges, 0),
       };
     }
     return rows;
@@ -97,7 +101,7 @@ class FakeStatement {
   }
 
   async run() {
-    if (this.db.failWrites && !/^\s*create\s+table/i.test(this.sql)) {
+    if (this.db.failWrites && !/^\s*(create|alter)\s+table/i.test(this.sql)) {
       throw new Error("simulated D1 write failure");
     }
     this.db.apply(this.sql, this.args);
@@ -185,12 +189,29 @@ test("settlement evidence recognizes x402 Payment-Response and native MPP Paymen
   assert.equal(hasSettlementResponse(new Response(null, { headers: { "www-authenticate": "Payment ..." } })), false);
 });
 
-test("unpaid GET increments requests and paid_attempts, but not settled_success", async () => {
+test("an unpaid GET is a challenge, not an attempt to pay", async () => {
   const response = await fetchWithCounters("/repair/json", "GET");
   assert.equal(response.status, 402);
   const row = db.rows.get("/repair/json");
   assert.equal(row.requests, 1);
+  assert.equal(row.challenges, 1);
+  // A crawler tripping the paywall must never be counted as a caller buying.
+  assert.equal(row.paid_attempts, 0);
+  assert.equal(row.settled_success, 0);
+});
+
+test("a rejected payment counts as an attempt even though it never settles", async () => {
+  const unpaid = await fetchWithCounters("/repair/json", "POST");
+  const { accepts } = paymentRequired(unpaid);
+  db.clear();
+  const header = settledPaymentHeader(accepts[0]);
+  const response = await fetchWithCounters("/repair/json", "POST", {
+    "payment-signature": `${header["payment-signature"]}`.slice(0, 40),
+  });
+  assert.equal(response.status, 402);
+  const row = db.rows.get("/repair/json");
   assert.equal(row.paid_attempts, 1);
+  assert.equal(row.challenges, 1);
   assert.equal(row.settled_success, 0);
 });
 
@@ -204,6 +225,7 @@ test("successful settled POST increments each paid counter exactly once", async 
   assert.equal(row.requests, 1);
   assert.equal(row.paid_attempts, 1);
   assert.equal(row.settled_success, 1);
+  assert.equal(row.challenges, 0);
 });
 
 test("free /diagnose increments free_requests and not paid_attempts", async () => {
@@ -224,19 +246,20 @@ test("/stats returns totals and all nine paid endpoint keys", async () => {
   assert.equal(response.status, 200);
   const body = await response.json();
   assert.deepEqual(Object.keys(body.counters).sort(), [
-    "free_requests", "paid_attempts", "settled_success", "total_requests",
+    "challenges", "free_requests", "paid_attempts", "settled_success", "total_requests",
   ].sort());
   for (const path of Object.keys(TOOLS)) {
     assert.ok(body.by_endpoint[path], `missing paid endpoint counter for ${path}`);
     assert.deepEqual(Object.keys(body.by_endpoint[path]).sort(), [
-      "first_seen", "free_requests", "last_seen", "paid_attempts", "requests", "settled_success",
+      "challenges", "first_seen", "free_requests", "last_seen", "paid_attempts", "requests", "settled_success",
     ].sort());
   }
   assert.deepEqual(body.counters, {
     total_requests: 1,
-    paid_attempts: 1,
+    paid_attempts: 0,
     settled_success: 0,
     free_requests: 0,
+    challenges: 1,
   });
   assert.equal(body.by_endpoint["/repair/json"].requests, 1);
   assert.ok(body.by_endpoint["/repair/json"].first_seen);

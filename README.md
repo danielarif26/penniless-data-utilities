@@ -1,17 +1,40 @@
 # Penniless Data Utilities
 
 Nine deterministic data and lookup tools for AI agents, paid per call in USDC.
-REST advertises both native MPP and [x402](https://x402.org); MCP uses x402 v2. No accounts, no API keys, no rate-limit
+REST advertises native MPP and [x402](https://x402.org) v1 and v2 at once; MCP uses x402 v2. No accounts, no API keys, no rate-limit
 tiers. Every tool is pure computation or a keyless public lookup — none of them
 call another AI model, so results are reproducible.
 
+- Web tool (free, no wallet): https://penniless-json-repair.sjaman.workers.dev/
 - Live endpoint (MCP): https://penniless-json-repair.sjaman.workers.dev/mcp
 - Live endpoint (REST): https://penniless-json-repair.sjaman.workers.dev
 - Discovery: `/health`, `/openapi.json`, `/llms.txt`, `/.well-known/x402`
 
+## Web tool
+
+`GET /` serves the JSON repair passes as a page. It compiles them into the
+browser and runs them there, so nothing is uploaded, no request reaches the
+Worker after load, and it works offline. Every pass that fires is named, which
+is the part a generic formatter does not tell you.
+
+The paid API below is the same nine passes for agents and scripts.
+
 ## Pricing
 
-`$0.001` USDC per call. REST advertises native MPP plus x402 v2 (`eip155:8453`, scheme `exact`); MCP uses x402 v2.
+`$0.001` USDC per call. REST advertises native MPP plus x402 v2 (`eip155:8453`, scheme `exact`) and x402 v1 (`base`); MCP uses x402 v2.
+
+A paid REST endpoint answers an unpaid call with every rail at once, so a client
+pays with whichever one it already speaks:
+
+| Rail | Requirements arrive in | Payment goes back in | Receipt |
+| ---- | ---------------------- | -------------------- | ------- |
+| x402 v2 / MPP | `PAYMENT-REQUIRED` header | `PAYMENT-SIGNATURE` | `PAYMENT-RESPONSE` |
+| x402 v1 | 402 JSON body (`x402Version: 1`) | `X-PAYMENT` | `X-PAYMENT-RESPONSE` |
+
+Both rails carry the same offer and settle the same way: a v1 `base` payer signs
+the same EIP-3009 authorization a v2 `eip155:8453` payer signs, so only the
+envelope differs. Every payment is verified against this server's own
+requirement, never against anything the client supplies.
 
 Base x402 settlements are verified by the free-tier [PayAI](https://facilitator.payai.network) facilitator. Native MPP is negotiated by `mppx`. Recipient (`payTo`): `0x3D98800c64C345950E1eAaa076D88C12d1BF5F37`.
 
@@ -86,13 +109,20 @@ facilitator has settled.
 
 ```bash
 npm install
-npm test        # 133 tests, runs fully offline (facilitator + upstream are injected)
+npm test              # 171 tests, runs fully offline (facilitator + upstream are injected)
+npm run test:client   # 19 client tests
 npx wrangler dev
-npx wrangler deploy
+npm run domain example.com       # point a custom domain at the Worker
+npm run verify-google <token>    # prove ownership to Google Search Console
+npm run ship                     # pull, install, deploy
 ```
 
 Environment (set in `wrangler.toml`): `X402_NETWORK`, `X402_FACILITATOR`,
-`X402_PRICE`, `X402_PAY_TO`. Production also has an encrypted Cloudflare secret
+`X402_PRICE`, `X402_PAY_TO`, optionally `GOOGLE_SITE_VERIFICATION` (set by
+`npm run verify-google`; supports both Search Console's HTML-tag and HTML-file
+methods), and optionally `CANONICAL_HOST` — set that to a
+custom domain once one points at the Worker, so it and the `workers.dev` host
+name the same canonical page instead of competing as duplicates. Production also has an encrypted Cloudflare secret
 `MPP_SECRET_KEY` used only to authenticate MPP challenges. Wallet private keys are
 never deployed to the Worker.
 

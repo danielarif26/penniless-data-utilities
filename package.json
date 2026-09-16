@@ -6,7 +6,10 @@
   "scripts": {
     "test": "node --test test/*.test.js",
     "test:client": "node --test client/test/*.test.js",
-    "verify:live": "node client/scripts/verify-live.mjs"
+    "verify:live": "node client/scripts/verify-live.mjs",
+    "ship": "git pull && npm install && wrangler deploy",
+    "domain": "node scripts/set-domain.mjs",
+    "verify-google": "node scripts/set-google-verification.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
