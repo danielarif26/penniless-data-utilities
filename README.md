@@ -112,7 +112,8 @@ npm install
 npm test              # 171 tests, runs fully offline (facilitator + upstream are injected)
 npm run test:client   # 19 client tests
 npx wrangler dev
-npm run ship          # pull, install, deploy
+npm run domain example.com   # point a custom domain at the Worker
+npm run ship                 # pull, install, deploy
 ```
 
 Environment (set in `wrangler.toml`): `X402_NETWORK`, `X402_FACILITATOR`,
