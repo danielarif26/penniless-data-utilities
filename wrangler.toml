@@ -2,6 +2,12 @@ name = "penniless-json-repair"
 main = "src/entry.js"
 compatibility_date = "2026-09-01"
 
+routes = [
+  { pattern = "json.smarifuzzaman.online", custom_domain = true }
+]
+
+workers_dev = true
+
 [[d1_databases]]
 binding = "DB"
 database_name = "penniless-data-utilities-counters"
@@ -11,7 +17,7 @@ database_id = "e699ef23-03c6-4d78-8c5c-e49c93813cd9"
 # Set this to a custom domain once one is pointed at this Worker, so that
 # domain and the workers.dev one name the same canonical page instead of
 # competing as duplicates. Unset is correct while there is only one host.
-# CANONICAL_HOST = "example.com"
+CANONICAL_HOST = "json.smarifuzzaman.online"
 X402_NETWORK = "eip155:8453"
 X402_FACILITATOR = "https://facilitator.payai.network"
 X402_PRICE = "$0.001"
