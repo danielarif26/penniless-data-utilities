@@ -1,7 +1,7 @@
 # Penniless Data Utilities
 
 Nine deterministic data and lookup tools for AI agents, paid per call in USDC.
-REST advertises both native MPP and [x402](https://x402.org); MCP uses x402 v2. No accounts, no API keys, no rate-limit
+REST advertises native MPP and [x402](https://x402.org) v1 and v2 at once; MCP uses x402 v2. No accounts, no API keys, no rate-limit
 tiers. Every tool is pure computation or a keyless public lookup — none of them
 call another AI model, so results are reproducible.
 
@@ -11,7 +11,20 @@ call another AI model, so results are reproducible.
 
 ## Pricing
 
-`$0.001` USDC per call. REST advertises native MPP plus x402 v2 (`eip155:8453`, scheme `exact`); MCP uses x402 v2.
+`$0.001` USDC per call. REST advertises native MPP plus x402 v2 (`eip155:8453`, scheme `exact`) and x402 v1 (`base`); MCP uses x402 v2.
+
+A paid REST endpoint answers an unpaid call with every rail at once, so a client
+pays with whichever one it already speaks:
+
+| Rail | Requirements arrive in | Payment goes back in | Receipt |
+| ---- | ---------------------- | -------------------- | ------- |
+| x402 v2 / MPP | `PAYMENT-REQUIRED` header | `PAYMENT-SIGNATURE` | `PAYMENT-RESPONSE` |
+| x402 v1 | 402 JSON body (`x402Version: 1`) | `X-PAYMENT` | `X-PAYMENT-RESPONSE` |
+
+Both rails carry the same offer and settle the same way: a v1 `base` payer signs
+the same EIP-3009 authorization a v2 `eip155:8453` payer signs, so only the
+envelope differs. Every payment is verified against this server's own
+requirement, never against anything the client supplies.
 
 Base x402 settlements are verified by the free-tier [PayAI](https://facilitator.payai.network) facilitator. Native MPP is negotiated by `mppx`. Recipient (`payTo`): `0x3D98800c64C345950E1eAaa076D88C12d1BF5F37`.
 
@@ -86,7 +99,8 @@ facilitator has settled.
 
 ```bash
 npm install
-npm test        # 133 tests, runs fully offline (facilitator + upstream are injected)
+npm test        # 140 tests, runs fully offline (facilitator + upstream are injected)
+npm run test:client   # 19 client tests
 npx wrangler dev
 npx wrangler deploy
 ```
