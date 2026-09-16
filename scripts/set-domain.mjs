@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-// Points a custom domain at this Worker: `npm run domain json.example.com`.
+// Points a custom domain at this Worker: `npm run domain json.mysite.dev`.
+// Undo with `npm run domain clear`.
 //
 // Attaching a domain is two edits that have to agree. `routes` with
 // custom_domain tells Cloudflare to serve the Worker there and issue the
@@ -18,12 +19,29 @@ import { dirname, join } from "node:path";
 
 const CONFIG = join(dirname(dirname(fileURLToPath(import.meta.url))), "wrangler.toml");
 
+// Domains nobody can own. A placeholder that reaches the config is worse than
+// a typo: the route fails, but CANONICAL_HOST still deploys, and the live page
+// spends the next while telling search engines its real address is a domain
+// that belongs to someone else.
+const UNOWNABLE = [
+  // Reserved by RFC 2606 and RFC 6761, at any depth: sub.example.com is no
+  // more ownable than example.com.
+  /(^|\.)example\.(com|net|org)$/,
+  /\.(example|invalid|localhost|test|local)$/,
+  // The words people leave in when they paste an instruction verbatim.
+  /(^|\.)(your|my|the)[-.]?(domain|site|website)\.[a-z]{2,}$/,
+  /(^|\.)(domain|mydomain|yourdomain|mysite|yoursite|website|sample|placeholder|foo|bar|test)\.(com|net|org)$/,
+]
+
+// Undo: takes the domain back out so a failed attempt can be cleaned up.
+export const CLEAR_WORDS = new Set(["--clear", "-clear", "clear", "none", "remove", "reset"]);
+
 // A hostname, not a URL: people reach for the address bar, so take what they
 // paste from it and reduce it rather than rejecting it over a scheme.
 export function normalizeHost(raw) {
-  if (typeof raw !== "string") return { error: "pass a domain, e.g. npm run domain json.example.com" };
+  if (typeof raw !== "string") return { error: "pass a domain, e.g. npm run domain json.mysite.dev" };
   let host = raw.trim().toLowerCase();
-  if (!host) return { error: "pass a domain, e.g. npm run domain json.example.com" };
+  if (!host) return { error: "pass a domain, e.g. npm run domain json.mysite.dev" };
 
   host = host.replace(/^https?:\/\//, "").replace(/\/.*$/, "").replace(/\.$/, "");
   if (host.includes("@")) return { error: `"${raw}" looks like an email address, not a domain` };
@@ -31,8 +49,14 @@ export function normalizeHost(raw) {
   if (host.endsWith(".workers.dev")) {
     return { error: "that is the workers.dev address, which already works — this is for a domain you own" };
   }
+  if (/[<>{}]/.test(host)) {
+    return { error: `"${raw}" still has placeholder brackets in it — put your own domain there` };
+  }
   if (!/^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$/.test(host)) {
-    return { error: `"${raw}" is not a domain name. Expected something like example.com or json.example.com` };
+    return { error: `"${raw}" is not a domain name. Expected something like jsontools.dev or json.mysite.dev` };
+  }
+  if (UNOWNABLE.some((pattern) => pattern.test(host))) {
+    return { error: `"${raw}" is a placeholder, not a domain you own. Use one of your real domains.` };
   }
   return { host };
 }
@@ -65,6 +89,16 @@ function setCanonicalHost(toml, host) {
   return toml.replace(/^\[vars\]\s*$/m, `[vars]\n${line}`);
 }
 
+// Puts the file back the way it was before a domain was set, so a failed
+// attempt leaves nothing behind claiming to be the canonical address.
+export function clearDomain(toml) {
+  let next = toml.replace(/^routes\s*=\s*\[[\s\S]*?^\]\n*/m, "");
+  next = next.replace(/^workers_dev\s*=.*\n*/m, "");
+  next = next.replace(/^CANONICAL_HOST\s*=.*$/m,
+    '# CANONICAL_HOST = "example.com"');
+  return next;
+}
+
 export function applyDomain(toml, host) {
   let next = setRoutes(toml, host);
   // Routes alone can retire the workers.dev subdomain; the paid API is
@@ -75,6 +109,19 @@ export function applyDomain(toml, host) {
 }
 
 function main(argv) {
+  if (CLEAR_WORDS.has(String(argv[0] ?? "").trim().toLowerCase())) {
+    const before = readFileSync(CONFIG, "utf8");
+    const after = clearDomain(before);
+    if (after === before) {
+      console.log("\n  No custom domain was set. Nothing to undo.\n");
+      return;
+    }
+    writeFileSync(CONFIG, after);
+    console.log("\n  Removed the custom domain. The workers.dev address is the canonical one again."
+      + "\n\n  Next:  npm run ship\n");
+    return;
+  }
+
   const { host, error } = normalizeHost(argv[0]);
   if (error) {
     console.error(`\n  ${error}\n`);
@@ -98,8 +145,8 @@ function main(argv) {
 
   Next:  npm run ship
 
-  If the deploy says the zone is not found, the domain is registered
-  somewhere else and has not been added to this Cloudflare account yet.
+  If the deploy says the zone is not found, this domain is not in your
+  Cloudflare account. Undo it with:  npm run domain clear
 `);
 }
 
