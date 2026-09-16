@@ -203,3 +203,74 @@ test("an X-PAYMENT aimed at a free path is not translated and does not re-run th
   // One execution, not a probe plus a replay.
   assert.equal(calls, 1);
 });
+
+// Forged payment envelopes, against a facilitator that rejects everything and
+// records what it was asked to verify. The point is not just that these are
+// refused: it is that the terms reaching the facilitator are always this
+// server's own, never the ones the attacker put in the envelope.
+test("a forged envelope can neither be served nor tamper with the terms verified", async () => {
+  const attacker = "0x000000000000000000000000000000000000dEaD";
+  const forgedAuthorization = {
+    signature: `0x${"11".repeat(65)}`,
+    authorization: {
+      from: attacker, to: attacker, value: "1",
+      validAfter: "0", validBefore: "99999999999", nonce: `0x${"22".repeat(32)}`,
+    },
+  };
+  const cheapTerms = {
+    scheme: "exact", network: NETWORK, amount: "1",
+    asset: USDC_BASE, payTo: attacker, maxTimeoutSeconds: 300,
+  };
+  const v1 = (extra = {}) => ({
+    x402Version: 1, scheme: "exact", network: "base", payload: forgedAuthorization, ...extra,
+  });
+
+  const variants = {
+    "v1 underpaying and redirecting payTo": { "x-payment": encode(v1()) },
+    "v1 declaring a CAIP-2 network": { "x-payment": encode(v1({ network: NETWORK })) },
+    "v1 smuggling its own accepted terms": { "x-payment": encode(v1({ accepted: cheapTerms })) },
+    "v2 with forged accepted terms": {
+      "payment-signature": encode({ x402Version: 2, accepted: cheapTerms, payload: forgedAuthorization }),
+    },
+    "v1 payload inside a v2 envelope": {
+      "payment-signature": encode({ x402Version: 1, accepted: cheapTerms, payload: forgedAuthorization }),
+    },
+    "both payment headers at once": {
+      "x-payment": encode(v1()),
+      "payment-signature": encode({ x402Version: 2, accepted: cheapTerms, payload: forgedAuthorization }),
+    },
+    "a spoofed internal probe header": { "x-pdu-internal-probe": "1" },
+    "a spoofed probe carrying a forged v1 payment": {
+      "x-pdu-internal-probe": "1", "x-payment": encode(v1()),
+    },
+    "a forged payment dressed as a browser": {
+      "x-payment": encode(v1()), "user-agent": "Mozilla/5.0", accept: "text/html",
+    },
+  };
+
+  const permissiveVerify = HTTPFacilitatorClient.prototype.verify;
+  const permissiveSettle = HTTPFacilitatorClient.prototype.settle;
+  const seen = [];
+  HTTPFacilitatorClient.prototype.verify = async (payload, requirements) => {
+    seen.push(requirements);
+    return { isValid: false, invalidReason: "invalid_signature" };
+  };
+  HTTPFacilitatorClient.prototype.settle = async () => {
+    assert.fail("a forged payment must never reach settlement");
+  };
+  try {
+    for (const [name, headers] of Object.entries(variants)) {
+      seen.length = 0;
+      const response = await fetchWorker(post(headers));
+      assert.notEqual(response.status, 200, `${name} must not be served`);
+      for (const requirements of seen) {
+        assert.equal(requirements.payTo, PAY_TO, `${name}: payTo was tampered with`);
+        assert.equal(requirements.amount, PRICE_ATOMIC, `${name}: amount was tampered with`);
+        assert.equal(requirements.network, NETWORK, `${name}: network was tampered with`);
+      }
+    }
+  } finally {
+    HTTPFacilitatorClient.prototype.verify = permissiveVerify;
+    HTTPFacilitatorClient.prototype.settle = permissiveSettle;
+  }
+});
