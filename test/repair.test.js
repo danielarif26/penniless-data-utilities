@@ -149,3 +149,26 @@ test("idempotent: repairing repaired output adds nothing", () => {
   assert.equal(second.ok, true);
   assert.deepEqual(second.applied, []);
 });
+
+
+test("single-quoted URL/comment markers are data, not comments", () => {
+  const r = repairJson("{url:'http://example.com/a', text:'not // a comment', block:'not /* comment */ either'}");
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.repaired, {
+    url: "http://example.com/a",
+    text: "not // a comment",
+    block: "not /* comment */ either",
+  });
+});
+
+test("escaped apostrophe in a single-quoted pseudo-JSON string is repaired", () => {
+  const r = repairJson("{text:'it\\'s ok'}");
+  assert.equal(r.ok, true);
+  assert.equal(r.repaired.text, "it's ok");
+});
+
+test("JSON region extraction ignores closing braces inside single-quoted strings", () => {
+  const r = repairJson("prefix {text:'} stays data', n:1} suffix");
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.repaired, { text: "} stays data", n: 1 });
+});

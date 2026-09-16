@@ -2,7 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { z } from "zod";
 import { createPaymentWrapper } from "@x402/mcp";
-import { TOOLS, MCP_ACCEPTS, ORIGIN, PRICE, validateArgs } from "./shared.js";
+import { TOOLS, ORIGIN, validateArgs } from "./shared.js";
 
 const ZOD_BY_TYPE = { string: () => z.string(), number: () => z.number(), boolean: () => z.boolean() };
 
@@ -11,10 +11,16 @@ const ZOD_BY_TYPE = { string: () => z.string(), number: () => z.number(), boolea
 // keeps the advertised MCP schema accurate without diverging from REST behavior.
 function zodField(spec) {
   const described = (inner) => (spec.description ? inner.describe(spec.description) : inner);
+  if (spec.type === "array") {
+    if (!spec.items) throw new TypeError("array schema requires items");
+    return described(z.array(zodField(spec.items)));
+  }
   if (spec.enum) {
+    const enumSchema = described(z.enum(spec.enum));
+    if (!spec.caseInsensitive) return enumSchema;
     return z.preprocess(
       (v) => (typeof v === "string" ? v.toUpperCase() : v),
-      described(z.enum(spec.enum)),
+      enumSchema,
     );
   }
   return described((ZOD_BY_TYPE[spec.type] ?? ZOD_BY_TYPE.string)());
@@ -27,9 +33,7 @@ function buildZodSchema(schema) {
     const field = zodField(spec);
     shape[key] = required.has(key) ? field : field.optional();
   }
-  // Match the public JSON Schema (`additionalProperties: false`) and REST
-  // validation instead of silently stripping unknown MCP arguments.
-  return z.object(shape).strict();
+  return schema.additionalProperties === false ? z.object(shape).strict() : z.object(shape);
 }
 
 // MCP over streamable HTTP, stateless: Cloudflare Workers must not hold session
@@ -54,16 +58,16 @@ function buildServer(resourceServer) {
     { name: "penniless-data-utilities", version: "3.1.0" },
     {
       description:
-        "Deterministic data utilities for agents, paid per call in USDC on Base over x402: JSON repair, YAML to JSON, cron next-run, text diff, HTML/text extraction, WHOIS, DNS, GitHub repo stats, email validation.",
+        "Deterministic data utilities for agents, paid per call in USDC on Base over x402: JSON repair, YAML to JSON, cron next-run, text diff, HTML/text extraction, WHOIS, DNS, GitHub repo stats, crypto prices, and email validation.",
       instructions:
-        `Every tool costs ${PRICE} USDC on Base via x402 v2. Call tools/list first; an unpaid tools/call returns a payment-required error whose data carries the payment requirements. Attach the signed x402 payment in the request _meta and retry the same call.`,
+        "Prices are listed per tool (compute $0.005; network-backed $0.02) in USDC on Base via x402 v2. Call tools/list first; an unpaid tools/call returns a payment-required error whose data carries the payment requirements. Attach the signed x402 payment in the request _meta and retry the same call.",
       website: ORIGIN,
     },
   );
 
   for (const [path, t] of Object.entries(TOOLS)) {
     const paid = createPaymentWrapper(resourceServer, {
-      accepts: [MCP_ACCEPTS],
+      accepts: [t.mcpAccepts],
       resource: {
         url: `mcp://tool/${t.mcpName}`,
         description: t.desc,
@@ -77,7 +81,7 @@ function buildServer(resourceServer) {
       t.mcpName,
       {
         title: t.serviceName,
-        description: `${t.desc} Costs ${PRICE} USDC on Base per call.`,
+        description: `${t.desc} Costs ${t.price} USDC on Base per call.`,
         inputSchema: buildZodSchema(t.schema),
         outputSchema: z.object({ ok: z.boolean() }).passthrough(),
       },

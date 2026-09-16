@@ -1,5 +1,5 @@
 const DEFAULT_BASE_URL = "https://penniless-json-repair.sjaman.workers.dev";
-const DEFAULT_TOLERANCE_USDC = 0.002;
+const DEFAULT_TOLERANCE_USDC = 0.02;
 const BASE_NETWORK = "eip155:8453";
 const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
 const DECIMAL_INTEGER = /^[0-9]+$/;
@@ -14,6 +14,7 @@ const TOOL_PATHS = Object.freeze({
   domainWhois: "/domain/whois",
   dnsLookup: "/dns/lookup",
   githubRepoStats: "/github/repo-stats",
+  cryptoPrice: "/price/crypto",
   emailValidate: "/email/validate",
 });
 
@@ -377,6 +378,7 @@ export function createPennilessClient(options = {}) {
     domainWhois: (domain) => paidPost(TOOL_PATHS.domainWhois, { domain }),
     dnsLookup: (domain, type) => paidPost(TOOL_PATHS.dnsLookup, type === undefined ? { domain } : { domain, type }),
     githubRepoStats: (repo) => paidPost(TOOL_PATHS.githubRepoStats, { repo }),
+    cryptoPrice: (symbols) => paidPost(TOOL_PATHS.cryptoPrice, { symbols }),
     emailValidate: (email) => paidPost(TOOL_PATHS.emailValidate, { email }),
   };
 

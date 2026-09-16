@@ -1,7 +1,7 @@
 # Penniless Data Utilities
 
-Nine deterministic data and lookup tools for AI agents, paid per call in USDC.
-REST advertises both native MPP and [x402](https://x402.org); MCP uses x402 v2. No accounts, no API keys, no rate-limit
+Ten deterministic data and lookup tools for AI agents, paid per call in USDC.
+REST and MCP use [x402](https://x402.org) v2. Native MPP REST is intentionally disabled so a failed tool call cannot be charged. No accounts, no API keys, no rate-limit
 tiers. Every tool is pure computation or a keyless public lookup — none of them
 call another AI model, so results are reproducible.
 
@@ -11,9 +11,15 @@ call another AI model, so results are reproducible.
 
 ## Pricing
 
-`$0.001` USDC per call. REST advertises native MPP plus x402 v2 (`eip155:8453`, scheme `exact`); MCP uses x402 v2.
+Pure-compute routes cost `$0.005` USDC per call. Network-backed routes cost
+`$0.02` USDC per call. REST and MCP use x402 v2 (`eip155:8453`, scheme `exact`).
+Each client can make **one successful free trial** on any pure-compute route in
+a rolling 24-hour window. The response identifies the trial and its normal
+price. Network-backed routes always require payment.
+Clients can opt out of the trial (for example, monitoring probes) with
+`X-Penniless-Free-Trial: off`.
 
-Base x402 settlements are verified by the free-tier [PayAI](https://facilitator.payai.network) facilitator. Native MPP is negotiated by `mppx`. Recipient (`payTo`): `0x3D98800c64C345950E1eAaa076D88C12d1BF5F37`.
+Base x402 settlements are verified by the free-tier [PayAI](https://facilitator.payai.network) facilitator. Native MPP REST is intentionally disabled. Recipient (`payTo`): `0x3D98800c64C345950E1eAaa076D88C12d1BF5F37`.
 
 ## Connect over MCP
 
@@ -40,17 +46,18 @@ If you use an x402-aware MCP client, `@x402/mcp` handles that exchange for you.
 
 ## Tools
 
-| MCP name           | REST path               | Arguments                          | Returns |
-| ------------------ | ----------------------- | ---------------------------------- | ------- |
-| `repair_json`      | `POST /repair/json`     | `{input}`                          | repaired JSON + which fixes applied |
-| `yaml_to_json`     | `POST /yaml/tojson`     | `{input}`                          | parsed value + warnings |
-| `cron_next_run`    | `POST /cron/nextrun`    | `{expr, after?}`                   | next UTC fire time |
-| `text_diff`        | `POST /diff`            | `{old, new, context?}`             | unified diff + counts |
-| `text_extract`     | `POST /text/extract`    | `{input, numbers?, codeBlocks?}`   | text, title, headings, links, URLs, emails |
-| `domain_whois`     | `POST /domain/whois`    | `{domain}`                         | registrar, statuses, expiry, nameservers, DNSSEC |
-| `dns_lookup`       | `POST /dns/lookup`      | `{domain, type?}`                  | DoH answers for A/AAAA/CNAME/MX/TXT/NS/SOA/PTR/SRV/CAA |
-| `github_repo_stats`| `POST /github/repo-stats`| `{repo}`                          | stars, forks, open issues, language, license |
-| `email_validate`   | `POST /email/validate`  | `{email}`                          | syntax + live MX deliverability |
+| MCP name           | REST path                 | Price    | Arguments                          | Returns |
+| ------------------ | ------------------------- | -------- | ---------------------------------- | ------- |
+| `repair_json`      | `POST /repair/json`       | `$0.005` | `{input}`                          | repaired JSON + which fixes applied |
+| `yaml_to_json`     | `POST /yaml/tojson`       | `$0.005` | `{input}`                          | parsed value + warnings |
+| `cron_next_run`    | `POST /cron/nextrun`      | `$0.005` | `{expr, after?}`                   | next UTC fire time |
+| `text_diff`        | `POST /diff`              | `$0.005` | `{old, new, context?}`             | unified diff + counts |
+| `text_extract`     | `POST /text/extract`      | `$0.005` | `{input, numbers?, codeBlocks?}`   | text, title, headings, links, URLs, emails |
+| `domain_whois`     | `POST /domain/whois`      | `$0.02`  | `{domain}`                         | registrar, statuses, expiry, nameservers, DNSSEC |
+| `dns_lookup`       | `POST /dns/lookup`        | `$0.02`  | `{domain, type?}`                  | DoH answers for A/AAAA/CNAME/MX/TXT/NS/SOA/PTR/SRV/CAA |
+| `github_repo_stats`| `POST /github/repo-stats` | `$0.02`  | `{repo}`                           | stars, forks, open issues, language, license |
+| `crypto_price`     | `POST /price/crypto`      | `$0.02`  | `{symbols}`                        | live CoinGecko USD prices for ETH/BTC/USDC/SOL |
+| `email_validate`   | `POST /email/validate`    | `$0.02`  | `{email}`                          | syntax + live MX deliverability |
 
 `POST /diagnose` is free: it classifies what is wrong with a malformed JSON
 payload without returning the repaired output, so a caller can check whether
@@ -86,15 +93,19 @@ facilitator has settled.
 
 ```bash
 npm install
-npm test        # 133 tests, runs fully offline (facilitator + upstream are injected)
+npm test        # runs fully offline (facilitator + upstream are injected)
 npx wrangler dev
 npx wrangler deploy
 ```
 
 Environment (set in `wrangler.toml`): `X402_NETWORK`, `X402_FACILITATOR`,
-`X402_PRICE`, `X402_PAY_TO`. Production also has an encrypted Cloudflare secret
-`MPP_SECRET_KEY` used only to authenticate MPP challenges. Wallet private keys are
-never deployed to the Worker.
+`X402_PAY_TO`, and `X402_ORIGIN`. Route prices are defined in the authoritative
+tool manifest. Native MPP REST is disabled, and
+wallet private keys are never deployed to the Worker.
+
+Set `FREE_TRIAL_SALT` as a Worker secret before deploying. The Worker uses it
+only to one-way-hash a client IP plus coarse user-agent class for the free-trial
+allowance; it never persists the IP or raw user agent.
 
 ## Maintainer
 

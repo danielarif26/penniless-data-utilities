@@ -36,7 +36,7 @@ test.after(() => {
   HTTPFacilitatorClient.prototype.settle = realSettle;
 });
 
-const PAID_METHODS = ["GET", "HEAD", "PUT", "DELETE", "POST"];
+const PAID_METHODS = ["GET", "HEAD", "OPTIONS", "PUT", "DELETE", "POST"];
 const payer = privateKeyToAccount(
   "0x0123456789012345678901234567890123456789012345678901234567890123",
 );
@@ -44,11 +44,11 @@ const paymentClient = new x402HTTPClient(
   new x402Client().register(NETWORK, new ExactEvmScheme(payer)),
 );
 
-function request(path, method, headers = {}) {
+function request(path, method, headers = {}, body = { input: "{foo: 1,}" }) {
   const init = { method, headers };
   if (method === "POST") {
     init.headers = { "content-type": "application/json", ...headers };
-    init.body = JSON.stringify({ input: "{foo: 1,}" });
+    init.body = JSON.stringify(body);
   }
   return new Request(`http://localhost${path}`, init);
 }
@@ -65,12 +65,19 @@ function paymentRequired(response, label) {
   return requirement;
 }
 
-function assertRequirement(requirement, label) {
+function assertRequirement(requirement, label, tool) {
   assert.equal(requirement.x402Version, 2, `${label} x402 version`);
   assert.equal(requirement.accepts?.[0]?.scheme, "exact", `${label} scheme`);
   assert.equal(requirement.accepts?.[0]?.network, "eip155:8453", `${label} network`);
-  assert.equal(requirement.accepts?.[0]?.amount, "1000", `${label} amount`);
+  assert.equal(requirement.accepts?.[0]?.amount, tool.priceAtomic, `${label} amount`);
   assert.equal(requirement.accepts?.[0]?.payTo, PAY_TO, `${label} payTo`);
+}
+
+function assertBazaarDiscovery(requirement, label) {
+  assert.equal(requirement.extensions?.bazaar?.info?.input?.type, "http", `${label} bazaar input type`);
+  assert.equal(requirement.extensions?.bazaar?.info?.input?.method, "POST", `${label} bazaar method`);
+  assert.equal(requirement.extensions?.bazaar?.info?.input?.bodyType, "json", `${label} bazaar body type`);
+  assert.ok(requirement.extensions?.bazaar?.schema, `${label} bazaar schema`);
 }
 
 test("every paid REST path requires the same x402 v2 payment for every HTTP method", async (t) => {
@@ -80,33 +87,16 @@ test("every paid REST path requires the same x402 v2 payment for every HTTP meth
         const response = await app.fetch(request(path, method));
         const label = `${method} ${path}`;
         assert.equal(response.status, 402, `${label} must be paywalled`);
-        assertRequirement(paymentRequired(response, label), label);
+        const requirement = paymentRequired(response, label);
+        assertRequirement(requirement, label, TOOLS[path]);
+        if (method === "POST") {
+          assertBazaarDiscovery(requirement, label);
+        } else {
+          assert.equal(requirement.extensions?.bazaar, undefined, `${label} must not advertise a non-callable method`);
+        }
       });
     }
   }
-});
-
-test("CORS preflight is free and payment headers are exposed to browser clients", async () => {
-  const preflight = await app.fetch(new Request("http://localhost/repair/json", {
-    method: "OPTIONS",
-    headers: {
-      origin: "https://example.com",
-      "access-control-request-method": "POST",
-      "access-control-request-headers": "content-type,payment-signature,x-payment",
-    },
-  }));
-  assert.equal(preflight.status, 204);
-  assert.equal(preflight.headers.get("access-control-allow-origin"), "*");
-  assert.match(preflight.headers.get("access-control-allow-methods") ?? "", /POST/);
-  assert.match(preflight.headers.get("access-control-allow-headers") ?? "", /Payment-Signature/i);
-  assert.equal(preflight.headers.has("payment-required"), false, "preflight must not trigger a payment challenge");
-
-  const challenge = await app.fetch(request("/repair/json", "POST", { origin: "https://example.com" }));
-  assert.equal(challenge.status, 402);
-  assert.equal(challenge.headers.get("access-control-allow-origin"), "*");
-  const exposed = challenge.headers.get("access-control-expose-headers") ?? "";
-  assert.match(exposed, /PAYMENT-REQUIRED/i);
-  assert.match(exposed, /PAYMENT-RESPONSE/i);
 });
 
 test("a payment echoed from the real requirement cannot settle a non-successful GET", async () => {
@@ -123,6 +113,24 @@ test("a payment echoed from the real requirement cannot settle a non-successful 
   assert.equal(response.status, 404, "paid GET must be rejected as an unsupported method");
   assert.equal(verifyCalls, verificationsBefore + 1, "the echoed payment must be verified");
   assert.equal(settleCalls, before, "a non-2xx GET must not settle or charge payment");
+});
+
+test("a paid POST whose tool returns ok:false is not settled or charged", async () => {
+  const unpaid = await app.fetch(request("/repair/json", "POST"));
+  assert.equal(unpaid.status, 402);
+  const requirement = paymentRequired(unpaid, "POST /repair/json");
+  const payment = await paymentClient.createPaymentPayload(requirement);
+  const verificationsBefore = verifyCalls;
+  const settlementsBefore = settleCalls;
+  const response = await app.fetch(request("/repair/json", "POST", {
+    ...paymentClient.encodePaymentSignatureHeader(payment),
+  }, { input: "not remotely json" }));
+
+  assert.equal(response.status, 422, "tool-level failure must be non-2xx");
+  assert.equal((await response.json()).ok, false);
+  assert.equal(verifyCalls, verificationsBefore + 1, "payment may be verified before tool execution");
+  assert.equal(settleCalls, settlementsBefore, "failed tool output must not settle or charge payment");
+  assert.equal(response.headers.get("payment-response"), null, "failed tool output must not carry a settlement receipt");
 });
 
 test("a paid POST still runs its handler and settles exactly once", async () => {
@@ -147,29 +155,10 @@ test("a paid POST still runs its handler and settles exactly once", async () => 
   assert.ok(response.headers.get("payment-response"), "settlement response header must be returned");
 });
 
-test("a paid POST whose tool returns ok:false is not settled", async () => {
-  const path = "/repair/json";
-  const original = TOOLS[path].handler;
-  TOOLS[path].handler = async () => ({ ok: false, error: "synthetic tool failure" });
-  try {
-    const unpaid = await app.fetch(request(path, "POST"));
-    const requirement = paymentRequired(unpaid, `POST ${path}`);
-    const payment = await paymentClient.createPaymentPayload(requirement);
-    const settlementsBefore = settleCalls;
-    const response = await app.fetch(request(path, "POST", {
-      ...paymentClient.encodePaymentSignatureHeader(payment),
-    }));
-    assert.equal(response.status, 422, "tool failure must be an HTTP error so x402 cancels settlement");
-    assert.deepEqual(await response.json(), { ok: false, error: "synthetic tool failure" });
-    assert.equal(settleCalls, settlementsBefore, "failed tool output must never settle or charge payment");
-  } finally {
-    TOOLS[path].handler = original;
-  }
-});
-
 test("free REST discovery and diagnostic endpoints stay free", async () => {
   const freeRequests = [
     ["GET", "/health"],
+    ["GET", "/"],
     ["GET", "/stats"],
     ["POST", "/diagnose"],
     ["GET", "/.well-known/x402"],
@@ -180,5 +169,28 @@ test("free REST discovery and diagnostic endpoints stay free", async () => {
   for (const [method, path] of freeRequests) {
     const response = await app.fetch(request(path, method));
     assert.equal(response.status, 200, `${method} ${path} must be free`);
+  }
+});
+
+test("root and machine-readable discovery derive all ten route prices from the catalogue", async () => {
+  const [root, discovery, openapi] = await Promise.all([
+    app.fetch(request("/", "GET")),
+    app.fetch(request("/.well-known/x402", "GET")),
+    app.fetch(request("/openapi.json", "GET")),
+  ]);
+  const rootBody = await root.json();
+  const discoveryBody = await discovery.json();
+  const openapiBody = await openapi.json();
+
+  assert.equal(rootBody.tools.length, 10);
+  assert.equal(discoveryBody.resources.filter((resource) => resource.accepts.length > 0).length, 10);
+  for (const [path, tool] of Object.entries(TOOLS)) {
+    assert.equal(rootBody.tools.find((item) => item.path === path)?.price, tool.price, `${path} root price`);
+    assert.equal(
+      discoveryBody.resources.find((item) => new URL(item.url).pathname === path)?.accepts?.[0]?.price,
+      tool.price,
+      `${path} discovery price`,
+    );
+    assert.equal(openapiBody.paths[path].post["x-payment-info"].price.amount, tool.priceUsd, `${path} OpenAPI price`);
   }
 });

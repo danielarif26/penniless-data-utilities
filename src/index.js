@@ -1,12 +1,11 @@
 import { Hono } from "hono";
-import { cors } from "hono/cors";
 import { paymentMiddleware, x402ResourceServer } from "@x402/hono";
-import { mpp as mppPaymentMiddleware } from "mppx/x402/hono";
 import { ExactEvmScheme } from "@x402/evm/exact/server";
 import { HTTPFacilitatorClient } from "@x402/core/server";
+import { declareDiscoveryExtension } from "@x402/extensions/bazaar";
 import {
-  TOOLS, ACCEPTS, ORIGIN, PAY_TO, NETWORK, FACILITATOR, PRICE, PRICE_USD, SEMANTIC,
-  validateArgs,
+  TOOLS, ORIGIN, PAY_TO, NETWORK, FACILITATOR, COMPUTE_PRICE, NETWORK_PRICE,
+  USDC_BASE, SEMANTIC, COMPUTE_TOOL_PATHS, validateArgs,
 } from "./shared.js";
 import { createMcpHandler } from "./mcp.js";
 
@@ -47,6 +46,36 @@ const COUNTER_SCHEMA = `
     last_seen TEXT NOT NULL
   )
 `;
+const PAYMENT_LIFECYCLE_SCHEMA = `
+  CREATE TABLE IF NOT EXISTS payment_lifecycle_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    occurred_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    route TEXT NOT NULL,
+    outcome TEXT NOT NULL CHECK (outcome IN (
+      'challenge_issued', 'settled_success', 'verify_failed',
+      'facilitator_error', 'handler_failed'
+    )),
+    payer_class TEXT NOT NULL CHECK (payer_class IN (
+      'no_payment_header', 'payment_header_present_unsettled',
+      'settled_external', 'settled_self'
+    )),
+    client_class TEXT NOT NULL CHECK (client_class IN (
+      'known_crawler', 'agent_client', 'browser', 'unknown'
+    ))
+  )
+`;
+const PAYMENT_LIFECYCLE_INDEX = `
+  CREATE INDEX IF NOT EXISTS payment_lifecycle_events_summary
+    ON payment_lifecycle_events (outcome, payer_class)
+`;
+const FREE_TRIAL_SCHEMA = `
+  CREATE TABLE IF NOT EXISTS free_trial_allowances (
+    client_hash TEXT PRIMARY KEY,
+    last_success_at TEXT,
+    reservation_id TEXT,
+    reservation_at TEXT
+  );
+`;
 const COUNTER_UPSERT = `
   INSERT INTO endpoint_counters (
     endpoint, requests, paid_attempts, settled_success, free_requests, first_seen, last_seen
@@ -66,6 +95,9 @@ function ensureCountersInitialized(db) {
   if (countersInitDatabase === db && countersInitPromise) return countersInitPromise;
   countersInitDatabase = db;
   countersInitPromise = db.prepare(COUNTER_SCHEMA).run()
+    .then(() => db.prepare(PAYMENT_LIFECYCLE_SCHEMA).run())
+    .then(() => db.prepare(PAYMENT_LIFECYCLE_INDEX).run())
+    .then(() => db.prepare(FREE_TRIAL_SCHEMA).run())
     .then(() => true)
     .catch((error) => {
       if (countersInitDatabase === db) {
@@ -78,6 +110,7 @@ function ensureCountersInitialized(db) {
 }
 
 const FREE_COUNTER_PATHS = new Set([
+  "/",
   "/health",
   "/diagnose",
   "/stats",
@@ -90,8 +123,8 @@ const TRACKED_COUNTER_PATHS = [
 ];
 
 export function hasSettlementResponse(response) {
-  // x402 v2 attaches Payment-Response; native MPP attaches Payment-Receipt.
-  // Either header is settlement evidence. A bare HTTP 402/WWW-Authenticate is not.
+  // x402 v2 attaches Payment-Response; compatible paid transports may attach Payment-Receipt.
+  // Either receipt header is settlement evidence. A bare HTTP 402/WWW-Authenticate is not.
   return response.headers.has("payment-response") || response.headers.has("payment-receipt");
 }
 
@@ -159,7 +192,7 @@ async function recordCounter(db, path, response, mcpRequest, mcpResponse) {
   let endpoint = path;
   let settledSuccess = response.status >= 200 && response.status < 300 && hasSettlementResponse(response) ? 1 : 0;
   let paidAttempt = Object.hasOwn(TOOLS, path) && (response.status === 402 || settledSuccess) ? 1 : 0;
-  let freeRequest = FREE_COUNTER_PATHS.has(path) ? 1 : 0;
+  let freeRequest = FREE_COUNTER_PATHS.has(path) || response.headers.get("x-free-trial") === "true" ? 1 : 0;
   if (path === "/mcp") ({ endpoint, paidAttempt, settledSuccess, freeRequest } = await mcpCounterFlags(mcpRequest, mcpResponse));
 
   await ensureCountersInitialized(db);
@@ -168,35 +201,219 @@ async function recordCounter(db, path, response, mcpRequest, mcpResponse) {
     .run();
 }
 
+function clientClass(userAgent) {
+  const ua = (userAgent ?? "").toLowerCase();
+  if (/(googlebot|bingbot|yandexbot|baiduspider|duckduckbot|slurp|facebookexternalhit)/.test(ua)) return "known_crawler";
+  if (/(mcp|agent|bot|crawler|python-requests|curl|axios|node-fetch|go-http-client)/.test(ua)) return "agent_client";
+  if (/(mozilla|safari|chrome|firefox|edg\/)/.test(ua)) return "browser";
+  return "unknown";
+}
+
+function paymentHeader(request) {
+  return request?.headers?.get("payment-signature")
+    ?? request?.headers?.get("x-payment")
+    ?? request?.headers?.get("payment");
+}
+
+function payerAddressFromPayment(value) {
+  if (!value) return null;
+  try {
+    const decoded = JSON.parse(atob(value.replace(/-/g, "+").replace(/_/g, "/")));
+    return decoded?.payload?.authorization?.from?.toLowerCase() ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function mcpCallDetails(body) {
+  if (body?.method !== "tools/call") return null;
+  const path = Object.entries(TOOLS)
+    .find(([, tool]) => tool.mcpName === body?.params?.name)?.[0];
+  if (!path) return null;
+  const payment = body?.params?._meta?.["x402/payment"];
+  return {
+    path,
+    carriesPayment: Boolean(payment),
+    payer: payment?.payload?.authorization?.from?.toLowerCase() ?? null,
+  };
+}
+
+function mcpResponseResult(body) {
+  const payloads = parseMcpResponsePayloads(body);
+  return payloads.map((payload) => payload?.result ?? payload);
+}
+
+async function recordLifecycleEvent(db, path, response, request, handlerFailed = false) {
+  if (!db?.prepare || (!Object.hasOwn(TOOLS, path) && path !== "/mcp")) return;
+  const isMcp = path === "/mcp";
+  let carriesPayment = Boolean(paymentHeader(request));
+  let payer = null;
+  if (isMcp) {
+    let body;
+    try {
+      body = await request?.json();
+    } catch {
+      return;
+    }
+    const call = mcpCallDetails(body);
+    // MCP initialization, tools/list, and unknown tools are not paid service
+    // invocations, so do not mix them into the payment lifecycle.
+    if (!call) return;
+    path = call.path;
+    carriesPayment = call.carriesPayment;
+    payer = call.payer;
+  }
+
+  let outcome;
+  if (response.status === 402) outcome = carriesPayment ? "verify_failed" : "challenge_issued";
+  else if (handlerFailed || response.status === 422) outcome = "handler_failed";
+  else if (response.status >= 500) outcome = "facilitator_error";
+  else if (
+    response.status >= 200
+    && response.status < 300
+    && (hasSettlementResponse(response)
+      || (isMcp && mcpResponseResult(await response.clone().text())
+        .some((result) => result?.isError !== true && result?._meta?.["x402/payment-response"]?.success === true)))
+  ) outcome = "settled_success";
+  // An MCP tools/call with no payment is represented as a JSON-RPC 200 error,
+  // rather than HTTP 402. It is still an unpaid payment challenge.
+  else if (isMcp && !carriesPayment) outcome = "challenge_issued";
+  else return;
+
+  let payerClass = carriesPayment ? "payment_header_present_unsettled" : "no_payment_header";
+  if (outcome === "settled_success") {
+    payer ??= payerAddressFromPayment(paymentHeader(request));
+    payerClass = payer === PAY_TO.toLowerCase() ? "settled_self" : "settled_external";
+  }
+  await ensureCountersInitialized(db);
+  await db.prepare(`
+    INSERT INTO payment_lifecycle_events (route, outcome, payer_class, client_class)
+    VALUES (?, ?, ?, ?)
+  `).bind(path, outcome, payerClass, clientClass(request?.headers?.get("user-agent"))).run();
+}
+
+async function readLifecycleSummary(db) {
+  const byOutcome = {};
+  const byPayerClass = {};
+  const byOutcomeAndPayerClass = {};
+  if (!db?.prepare) {
+    return {
+      by_outcome: byOutcome,
+      by_payer_class: byPayerClass,
+      by_outcome_and_payer_class: byOutcomeAndPayerClass,
+    };
+  }
+  try {
+    await ensureCountersInitialized(db);
+    const result = await db.prepare(`
+      SELECT outcome, payer_class, COUNT(*) AS count
+      FROM payment_lifecycle_events
+      GROUP BY outcome, payer_class
+    `).all();
+    for (const row of result.results ?? []) {
+      const count = Number(row.count) || 0;
+      byOutcome[row.outcome] = (byOutcome[row.outcome] ?? 0) + count;
+      byPayerClass[row.payer_class] = (byPayerClass[row.payer_class] ?? 0) + count;
+      byOutcomeAndPayerClass[`${row.outcome}:${row.payer_class}`] = count;
+    }
+  } catch (error) {
+    console.error("D1 lifecycle summary read failed", error);
+  }
+  return {
+    by_outcome: byOutcome,
+    by_payer_class: byPayerClass,
+    by_outcome_and_payer_class: byOutcomeAndPayerClass,
+  };
+}
+
 function scheduleCounter(c, path, response, mcpRequest) {
   try {
     const mcpResponse = path === "/mcp" ? response.clone() : null;
+    const mcpLifecycleRequest = path === "/mcp" ? mcpRequest?.clone() : null;
     // Defer starting even the schema check until after the response exists.
     const write = Promise.resolve()
       .then(() => recordCounter(c.env?.DB, path, response, mcpRequest, mcpResponse))
       .catch((error) => console.error("D1 counter write failed", error));
+    const lifecycleRequest = path === "/mcp" ? mcpLifecycleRequest : c.req.raw;
+    const lifecycle = Promise.resolve()
+      .then(() => recordLifecycleEvent(
+        c.env?.DB, path, response, lifecycleRequest, Boolean(c.get("handlerFailed")),
+      ))
+      .catch((error) => console.error("D1 lifecycle event write failed", error));
 
     // app.fetch() in Node tests does not have an execution context; retaining
     // the promise there keeps the request behavior identical while Workers
     // uses the native background-task mechanism.
     try {
-      c.executionCtx.waitUntil(write);
+      c.executionCtx.waitUntil(Promise.all([write, lifecycle]));
     } catch {
       void write;
+      void lifecycle;
     }
   } catch (error) {
     console.error("D1 counter scheduling failed", error);
   }
 }
 
+async function stableClientHash(c) {
+  const ip = c.req.header("cf-connecting-ip");
+  const salt = c.env?.FREE_TRIAL_SALT;
+  if (!salt || !ip) return null;
+  const input = new TextEncoder().encode(`${salt}:${ip}:${clientClass(c.req.header("user-agent"))}`);
+  const digest = await crypto.subtle.digest("SHA-256", input);
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+async function reserveFreeTrial(db, clientHash, reservationId) {
+  if (!db?.prepare) return false;
+  await ensureCountersInitialized(db);
+  await db.prepare(`
+    INSERT INTO free_trial_allowances (client_hash, reservation_id, reservation_at)
+    VALUES (?, ?, CURRENT_TIMESTAMP)
+    ON CONFLICT(client_hash) DO UPDATE SET
+      reservation_id = excluded.reservation_id,
+      reservation_at = CURRENT_TIMESTAMP
+    WHERE (last_success_at IS NULL OR last_success_at <= datetime('now', '-1 day'))
+      AND (reservation_at IS NULL OR reservation_at <= datetime('now', '-5 minutes'))
+  `).bind(clientHash, reservationId).run();
+  const result = await db.prepare(`
+    SELECT reservation_id FROM free_trial_allowances
+    WHERE client_hash = ? AND reservation_id = ?
+  `).bind(clientHash, reservationId).first();
+  return Boolean(result);
+}
+
+async function finishFreeTrial(db, clientHash, reservationId, success) {
+  if (!db?.prepare) return;
+  const statement = success
+    ? `UPDATE free_trial_allowances
+       SET last_success_at = CURRENT_TIMESTAMP, reservation_id = NULL, reservation_at = NULL
+       WHERE client_hash = ? AND reservation_id = ?`
+    : `UPDATE free_trial_allowances
+       SET reservation_id = NULL, reservation_at = NULL
+       WHERE client_hash = ? AND reservation_id = ?`;
+  await db.prepare(statement).bind(clientHash, reservationId).run();
+}
+
 function isCounterPath(path) {
   return TRACKED_COUNTER_PATHS.includes(path);
+}
+
+function mayRequestFreeTrial(c) {
+  return c.req.method === "POST"
+    && COMPUTE_TOOL_PATHS.includes(c.req.path)
+    && !paymentHeader(c.req.raw)
+    && c.req.header("x-penniless-free-trial") !== "off"
+    && Boolean(c.req.header("cf-connecting-ip"))
+    && Boolean(c.env?.FREE_TRIAL_SALT)
+    && Boolean(c.env?.DB?.prepare);
 }
 
 function emptyCounter() {
   return {
     requests: 0,
     paid_attempts: 0,
+    payment_challenges: 0,
     settled_success: 0,
     free_requests: 0,
     first_seen: null,
@@ -221,19 +438,22 @@ async function readCounters(db) {
   }
 
   const byEndpoint = Object.fromEntries(TRACKED_COUNTER_PATHS.map((path) => [path, emptyCounter()]));
-  const counters = { total_requests: 0, paid_attempts: 0, settled_success: 0, free_requests: 0 };
+  const counters = { total_requests: 0, paid_attempts: 0, payment_challenges: 0, settled_success: 0, free_requests: 0 };
   for (const row of rows) {
     const requests = Number(row.requests) || 0;
     const paidAttempts = Number(row.paid_attempts) || 0;
     const settledSuccess = Number(row.settled_success) || 0;
+    const paymentChallenges = Math.max(paidAttempts - settledSuccess, 0);
     const freeRequests = Number(row.free_requests) || 0;
     counters.total_requests += requests;
     counters.paid_attempts += paidAttempts;
+    counters.payment_challenges += paymentChallenges;
     counters.settled_success += settledSuccess;
     counters.free_requests += freeRequests;
     byEndpoint[row.endpoint] = {
       requests,
       paid_attempts: paidAttempts,
+      payment_challenges: paymentChallenges,
       settled_success: settledSuccess,
       free_requests: freeRequests,
       first_seen: row.first_seen,
@@ -245,30 +465,32 @@ async function readCounters(db) {
 
 const routes = {};
 for (const [path, t] of Object.entries(TOOLS)) {
-  routes[`* ${path}`] = {
-    accepts: ACCEPTS,
+  // Put the callable POST route first so Bazaar indexes the real tool contract.
+  routes[`POST ${path}`] = {
+    accepts: t.accepts,
     description: t.desc,
     mimeType: "application/json",
     serviceName: t.serviceName,
     tags: t.tags,
-    // Keep the payment challenge extension-free so the official mppx x402
-    // compatibility negotiator can faithfully expose the same EIP-3009 offer
-    // over both MPP and x402. Discovery metadata remains in OpenAPI/well-known.
+    extensions: declareDiscoveryExtension({
+      method: "POST",
+      bodyType: "json",
+      input: t.input,
+      inputSchema: t.schema,
+      output: { example: t.out },
+    }),
+  };
+  // Keep all other methods payment-protected, but do not advertise them as callable tools.
+  routes[`* ${path}`] = {
+    accepts: t.accepts,
+    description: t.desc,
+    mimeType: "application/json",
+    serviceName: t.serviceName,
+    tags: t.tags,
   };
 }
 
 const app = new Hono();
-
-// Browser clients must be able to complete CORS preflight before negotiating a
-// payment. In particular, OPTIONS must never be paywalled, and the payment
-// challenge/settlement headers must be readable by cross-origin clients.
-app.use("*", cors({
-  origin: "*",
-  allowMethods: ["GET", "HEAD", "POST", "PUT", "DELETE", "OPTIONS"],
-  allowHeaders: ["Content-Type", "Payment-Signature", "X-PAYMENT", "Authorization"],
-  exposeHeaders: ["PAYMENT-REQUIRED", "PAYMENT-RESPONSE", "WWW-Authenticate", "Payment-Receipt"],
-  maxAge: 86400,
-}));
 
 // This is registered before x402 so it observes both 402 requirements and the
 // final settled response, while the D1 work itself runs only after the response
@@ -291,6 +513,7 @@ app.use("*", async (c, next) => {
 
 for (const path of Object.keys(TOOLS)) {
   app.use(path, async (c, next) => {
+    if (mayRequestFreeTrial(c)) return next();
     if (!(await ensureResourceServerInitialized())) {
       return c.json({ ok: false, error: "x402 facilitator unavailable" }, 503);
     }
@@ -299,42 +522,81 @@ for (const path of Object.keys(TOOLS)) {
 }
 
 const x402OnlyMiddleware = paymentMiddleware(routes, resourceServer, undefined, undefined, false);
-let dualRailMiddleware = null;
-let dualRailSecret = null;
-
+// Keep REST payments on x402 only. The native MPP middleware settles before the
+// protected tool handler runs, which can charge a request that later fails.
 app.use("*", async (c, next) => {
-  const secret = c.env?.MPP_SECRET_KEY;
-  if (!secret) return x402OnlyMiddleware(c, next);
-  if (String(secret).length < 32) {
-    return c.json({ ok: false, error: "MPP server secret is misconfigured" }, 503);
+  if (mayRequestFreeTrial(c)) {
+    try {
+      const clientHash = await stableClientHash(c);
+      const reservationId = crypto.randomUUID();
+      if (clientHash && await reserveFreeTrial(c.env.DB, clientHash, reservationId)) {
+        c.set("freeTrial", { clientHash, reservationId });
+        return next();
+      }
+    } catch (error) {
+      // D1 trouble must not turn a paid route into an unbounded free route.
+      console.error("free trial allowance check failed", error);
+    }
+    if (!(await ensureResourceServerInitialized())) {
+      return c.json({ ok: false, error: "x402 facilitator unavailable" }, 503);
+    }
   }
-  if (!dualRailMiddleware || dualRailSecret !== secret) {
-    dualRailSecret = secret;
-    dualRailMiddleware = mppPaymentMiddleware(routes, resourceServer, {
-      secretKey: secret,
-      realm: new URL(ORIGIN).host,
-    });
-  }
-  return dualRailMiddleware(c, next);
+  return x402OnlyMiddleware(c, next);
 });
 
 for (const path of Object.keys(TOOLS)) {
   app.post(path, async (c) => {
+    const freeTrial = c.get("freeTrial");
+    const finishTrial = async (success) => {
+      if (freeTrial) {
+        try {
+          await finishFreeTrial(c.env.DB, freeTrial.clientHash, freeTrial.reservationId, success);
+        } catch (error) {
+          console.error("free trial allowance completion failed", error);
+        }
+      }
+    };
     let body;
     try { body = await c.req.json(); }
-    catch { return c.json({ ok: false, error: "request body must be JSON" }, 400); }
+    catch {
+      await finishTrial(false);
+      return c.json({ ok: false, error: "request body must be JSON" }, 400);
+    }
     const tool = TOOLS[path];
     const bad = validateArgs(tool.schema, body);
-    if (bad) return c.json({ ok: false, error: bad }, 400);
-    const result = await tool.handler(body);
-    // x402 settles only after a successful (<400) handler response. A tool-level
-    // failure must therefore be an HTTP error as well as `{ ok: false }`, or a
-    // caller can be charged for a failed operation.
-    return c.json(result, result?.ok === false ? 422 : 200);
+    if (bad) {
+      await finishTrial(false);
+      return c.json({ ok: false, error: bad }, 400);
+    }
+    let result;
+    try {
+      result = await tool.handler(body);
+    } catch (error) {
+      await finishTrial(false);
+      c.set("handlerFailed", true);
+      throw error;
+    }
+    // x402 settles successful (2xx) responses. A tool can fail cleanly by
+    // returning {ok:false}; expose that as non-2xx so failed work is never charged.
+    if (result && result.ok === false) {
+      await finishTrial(false);
+      c.set("handlerFailed", true);
+      return c.json(result, 422);
+    }
+    await finishTrial(Boolean(freeTrial));
+    if (freeTrial) {
+      return c.json({
+        ...result,
+        free_trial: true,
+        normal_price: tool.price,
+        payment: `This free trial is used. Future calls cost ${tool.price} USDC on Base via x402.`,
+      }, 200, { "X-Free-Trial": "true" });
+    }
+    return c.json(result);
   });
 }
 
-// MCP over streamable HTTP: the same nine tools, same price, same wallet.
+// MCP over streamable HTTP: the same ten tools, same per-route prices and wallet.
 // Listing is free to call; only tools/call carries the payment requirement.
 app.post("/mcp", async (c) => {
   if (!(await ensureResourceServerInitialized())) {
@@ -349,20 +611,61 @@ app.post("/mcp", async (c) => {
   }
 });
 
+const pricing = { compute: COMPUTE_PRICE, network: NETWORK_PRICE, currency: "USDC", model: "per_call" };
+
+app.get("/", (c) => c.json({
+  name: "Penniless Data Utilities",
+  description: "Ten deterministic data and lookup tools for AI agents, paid per successful call over x402 v2.",
+  tools: Object.entries(TOOLS).map(([path, tool]) => ({
+    name: tool.mcpName,
+    path,
+    method: "POST",
+    description: tool.desc,
+    price: tool.price,
+    currency: "USDC",
+  })),
+  payment: {
+    protocol: "x402 v2",
+    scheme: "exact",
+    network: NETWORK,
+    asset: "USDC",
+    assetAddress: USDC_BASE,
+    facilitator: FACILITATOR,
+  },
+  links: {
+    manifest: `${ORIGIN}/.well-known/x402`,
+    agentManifest: `${ORIGIN}/.well-known/agent.json`,
+    health: `${ORIGIN}/health`,
+    mcp: `${ORIGIN}/mcp`,
+  },
+}));
+
 app.get("/health", (c) => c.json({
-  ok: true, x402Version: 2, mppRestEnabled: Boolean(c.env?.MPP_SECRET_KEY), network: NETWORK, price: PRICE, facilitator: FACILITATOR,
+  ok: true, x402Version: 2, mppRestEnabled: false, network: NETWORK, pricing, facilitator: FACILITATOR,
   endpoints: Object.keys(TOOLS), mcp: `${ORIGIN}/mcp`,
 }));
 app.get("/stats", async (c) => {
-  const { counters, byEndpoint } = await readCounters(c.env?.DB);
+  const [{ counters, byEndpoint }, lifecycle] = await Promise.all([
+    readCounters(c.env?.DB),
+    readLifecycleSummary(c.env?.DB),
+  ]);
   return c.json({
     ok: true,
-    price: PRICE,
+    pricing,
     paid: true,
     endpoints: Object.keys(TOOLS),
     counters,
     by_endpoint: byEndpoint,
-    note: "counters persisted via D1",
+    payment_lifecycle: lifecycle,
+    payment_lifecycle_semantics: "Aggregated durable lifecycle events. No IP, wallet address, payment payload, or request header is exposed or stored.",
+    counter_semantics: {
+      paid_attempts: "legacy counter: payment-required challenges plus verified settled successes; not a charge or customer count",
+      payment_challenges: "derived unpaid payment-required challenges (legacy paid_attempts minus settled_success)",
+      settled_success: "verified successful settlements; use this for paid sales",
+    },
+    note: counters.settled_success === 0
+      ? "No verified paid sales are recorded yet. Counters persisted via D1."
+      : "Verified paid sales are recorded in settled_success. Counters persisted via D1.",
   });
 });
 
@@ -383,7 +686,7 @@ app.post("/diagnose", async (c) => {
   if (/\/\/|\/\*|\*\//.test(input.replace(/"[^"\\]*"/g, ""))) problems.push("comments");
   let parsesNow = true;
   try { JSON.parse(input); } catch { parsesNow = false; }
-  return c.json({ ok: true, parsesNow, inputBytes: input.length, problems, paidRepair: `POST /repair/json at ${PRICE} via x402 (USDC on Base)` });
+  return c.json({ ok: true, parsesNow, inputBytes: input.length, problems, paidRepair: `POST /repair/json at ${TOOLS["/repair/json"].price} via x402 (USDC on Base)` });
 });
 
 // Static domain-verification token published by 402index.io for instant approval.
@@ -401,22 +704,13 @@ app.get("/.well-known/x402", (c) => c.json({
   openapi: `${ORIGIN}/openapi.json`,
   llms: `${ORIGIN}/llms.txt`,
   mcp: `${ORIGIN}/mcp`,
-  // MPP (Machine Payments Protocol) server info for MPPscan discovery
-  mpp: {
-    enabled: Boolean(c.env?.MPP_SECRET_KEY),
-    paymentServer: {
-      scheme: "exact",
-      network: NETWORK,
-      payTo: PAY_TO,
-      price: PRICE,
-      asset: "USDC",
-      assetAddress: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
-    },
-  },
+  // Native MPP REST is intentionally disabled: x402 settles only after a
+  // successful protected response, avoiding charge-on-failure behavior.
+  mpp: { enabled: false },
   resources: [
     ...Object.entries(TOOLS).map(([path, t]) => ({
       url: `${ORIGIN}${path}`, method: "POST", description: t.desc,
-      accepts: [ACCEPTS],
+      accepts: [t.accepts],
     })),
     {
       url: `${ORIGIN}/diagnose`, method: "POST",
@@ -428,28 +722,20 @@ app.get("/.well-known/x402", (c) => c.json({
 
 app.get("/llms.txt", (c) => c.text(`${ORIGIN} - Penniless Data Utilities
 
-All paid endpoints: x402 v2 / MPP, ${PRICE} USDC on Base (eip155:8453), payTo ${PAY_TO}.
+Ten paid endpoints over x402 v2 on Base (eip155:8453), payTo ${PAY_TO}.
+Pure-compute routes cost ${COMPUTE_PRICE} USDC; network-backed routes cost ${NETWORK_PRICE} USDC.
+Each client receives one successful free trial on a pure-compute route per rolling 24 hours. Network-backed routes always require payment.
 
-MCP (streamable HTTP): ${ORIGIN}/mcp - the same nine tools over x402 v2, priced per tools/call.
+MCP (streamable HTTP): ${ORIGIN}/mcp - the same ten tools and per-tool prices.
 
 Paid:
-  POST /repair/json       {input}       -> {ok, repaired, applied}   malformed LLM JSON -> valid JSON
-  POST /yaml/tojson       {input}       -> {ok, value, warnings}     YAML subset -> JSON
-  POST /cron/nextrun      {expr,after}  -> {ok, next, epochMs}       next UTC cron fire time
-  POST /diff              {old,new}     -> {ok, added, removed, unified}
-  POST /text/extract      {input}       -> {ok, title, headings, links, urls, emails, text}
-  POST /domain/whois      {domain}      -> {ok, found, registrar, status, events, nameservers, dnssec}
-  POST /dns/lookup        {domain,type} -> {ok, status, answers}     A AAAA CNAME MX TXT NS SOA PTR SRV CAA
-  POST /github/repo-stats {repo}        -> {ok, found, stars, forks, openIssues, language, license, pushedAt}
-  POST /email/validate    {email}       -> {ok, valid, formatValid, domainHasMx, mx}
+${Object.entries(TOOLS).map(([path, tool]) => `  POST ${path}  ${tool.price} USDC  ${tool.desc}`).join("\n")}
 
 Free:
   POST /diagnose      {input}      -> {parsesNow, problems[]}   JSON problem classifier
 
 Payment discovery:
   x402 v2:      ${ORIGIN}/.well-known/x402
-  MPP Bazaar:   Enable via x402 discovery - same endpoint
-  MPPscan:      Discover at ${ORIGIN}/.well-known/x402
 `));
 
 app.get("/openapi.json", (c) => {
@@ -459,12 +745,12 @@ app.get("/openapi.json", (c) => {
       post: {
         summary: t.serviceName,
         description: t.desc,
-        "x-payment-info": { price: { mode: "fixed", currency: "USD", amount: PRICE_USD }, protocols: [{ x402: {} }, { mpp: {} }] },
+        "x-payment-info": { price: { mode: "fixed", currency: "USD", amount: t.priceUsd }, protocols: [{ x402: {} }] },
         requestBody: { required: true, content: { "application/json": { schema: t.schema } } },
         responses: {
           "200": { description: "Result.", content: { "application/json": { schema: { type: "object" } } } },
           "400": { description: "Invalid request body." },
-          "402": { description: "Payment required (x402 v2 / MPP)." },
+          "402": { description: "Payment required (x402 v2)." },
           "413": { description: "Input exceeds maxBytes." },
         },
       },
@@ -472,22 +758,22 @@ app.get("/openapi.json", (c) => {
   }
   paths["/diagnose"] = { post: { summary: "Free JSON problem classifier", description: "Free pre-check before paying for /repair/json.", requestBody: { required: true, content: { "application/json": { schema: { type: "object" } } } }, responses: { "200": { description: "ok" } } } };
   paths["/health"] = { get: { summary: "Liveness + config", responses: { "200": { description: "ok" } } } };
-  paths["/mcp"] = { post: { summary: "MCP streamable HTTP transport", description: `Model Context Protocol endpoint exposing the same tools over x402 v2. Per-call price ${PRICE} USDC on Base.`, responses: { "200": { description: "JSON-RPC response." }, "402": { description: "Payment required (x402 v2)." } } } };
+  paths["/mcp"] = { post: { summary: "MCP streamable HTTP transport", description: `Model Context Protocol endpoint exposing the same ten tools and their route prices over x402 v2. Compute ${COMPUTE_PRICE}; network-backed ${NETWORK_PRICE} USDC on Base.`, responses: { "200": { description: "JSON-RPC response." }, "402": { description: "Payment required (x402 v2)." } } } };
   return c.json({
     openapi: "3.1.0",
     info: {
       title: "Penniless Data Utilities",
       description: SEMANTIC,
       version: "3.1.0",
-      "x-guidance": "Deterministic data and lookup tools for agents. Use /repair/json when JSON.parse rejects near-JSON from an LLM; /yaml/tojson to turn YAML config into JSON; /cron/nextrun to resolve a cron schedule; /diff to compare two texts; /text/extract to pull links/emails/headings from HTML; /domain/whois and /dns/lookup for domain registration and DNS records; /github/repo-stats for repository popularity; /email/validate to check syntax plus MX deliverability. Call the REST paths directly over x402 v2 or native MPP, or connect an MCP client to /mcp over x402 v2. Paid REST endpoints return HTTP 402 advertising both rails; MCP tools/call uses x402 v2. /diagnose and /health are free.",
+      "x-guidance": "Deterministic data and lookup tools for agents. Use /repair/json when JSON.parse rejects near-JSON from an LLM; /yaml/tojson to turn YAML config into JSON; /cron/nextrun to resolve a cron schedule; /diff to compare two texts; /text/extract to pull links/emails/headings from HTML; /domain/whois and /dns/lookup for domain registration and DNS records; /github/repo-stats for repository popularity; /email/validate to check syntax plus MX deliverability. Call the REST paths directly over x402 v2, or connect an MCP client to /mcp over x402 v2. Paid REST endpoints return an x402 HTTP 402 payment challenge; MCP tools/call uses x402 v2. /diagnose and /health are free.",
       "x-payment-server": {
         scheme: "exact",
         network: NETWORK,
         payTo: PAY_TO,
-        price: PRICE,
+        pricing,
         asset: "USDC",
-        assetAddress: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913",
-        mpp: { enabled: Boolean(c.env?.MPP_SECRET_KEY) },
+        assetAddress: USDC_BASE,
+        mpp: { enabled: false },
       },
     },
     servers: [{ url: ORIGIN }],

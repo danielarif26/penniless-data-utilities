@@ -5,23 +5,24 @@ import { parsePaymentRequirement } from "../index.js";
 
 const DEFAULT_BASE_URL = "https://penniless-json-repair.sjaman.workers.dev";
 const EXPECTED_PAY_TO = "0x3D98800c64C345950E1eAaa076D88C12d1BF5F37";
-const EXPECTED_AMOUNT = "1000";
 const REQUEST_TIMEOUT_MS = 15_000;
 
 const PAID_ENDPOINTS = [
-  ["/repair/json", { input: "{foo: 1,}" }],
-  ["/yaml/tojson", { input: "name: verifier" }],
-  ["/cron/nextrun", { expr: "0 * * * *", after: "2026-01-01T00:00:00Z" }],
-  ["/diff", { old: "before", new: "after" }],
-  ["/text/extract", { input: "<p>verification</p>" }],
-  ["/domain/whois", { domain: "example.com" }],
-  ["/dns/lookup", { domain: "example.com", type: "A" }],
-  ["/github/repo-stats", { repo: "danielarif26/penniless-data-utilities" }],
-  ["/email/validate", { email: "hello@example.com" }],
+  ["/repair/json", { input: "{foo: 1,}" }, "5000"],
+  ["/yaml/tojson", { input: "name: verifier" }, "5000"],
+  ["/cron/nextrun", { expr: "0 * * * *", after: "2026-01-01T00:00:00Z" }, "5000"],
+  ["/diff", { old: "before", new: "after" }, "5000"],
+  ["/text/extract", { input: "<p>verification</p>" }, "5000"],
+  ["/domain/whois", { domain: "example.com" }, "20000"],
+  ["/dns/lookup", { domain: "example.com", type: "A" }, "20000"],
+  ["/github/repo-stats", { repo: "danielarif26/penniless-data-utilities" }, "20000"],
+  ["/price/crypto", { symbols: ["eth", "btc"] }, "20000"],
+  ["/email/validate", { email: "hello@example.com" }, "20000"],
 ];
 
 const EXPECTED_TOOLS = [
   "cron_next_run",
+  "crypto_price",
   "dns_lookup",
   "domain_whois",
   "email_validate",
@@ -47,6 +48,9 @@ function jsonHeaders() {
     accept: "application/json, text/event-stream",
     "content-type": "application/json",
     "mcp-protocol-version": "2025-06-18",
+    // Keep probes read-only from the allowance perspective. Agents omit this
+    // header to receive their one free compute trial.
+    "x-penniless-free-trial": "off",
   };
 }
 
@@ -114,10 +118,10 @@ function amountFrom(requirement) {
   );
 }
 
-function validateRequirement(payload, label) {
+function validateRequirement(payload, label, expectedAmount) {
   const requirement = parsePaymentRequirement(payload);
   const amount = amountFrom(requirement);
-  assert(amount === EXPECTED_AMOUNT, `${label} advertised amount ${amount || "<missing>"}, expected ${EXPECTED_AMOUNT}`);
+  assert(amount === expectedAmount, `${label} advertised amount ${amount || "<missing>"}, expected ${expectedAmount}`);
   assert(
     requirement.payTo.toLowerCase() === EXPECTED_PAY_TO.toLowerCase(),
     `${label} advertised payTo ${requirement.payTo}, expected ${EXPECTED_PAY_TO}`,
@@ -162,7 +166,7 @@ export async function runLiveVerification({
     rows.push(row);
   }
 
-  for (const [path, body] of PAID_ENDPOINTS) {
+  for (const [path, body, expectedAmount] of PAID_ENDPOINTS) {
     await check(path, async (row) => {
       const response = await request(fetchImpl, `${origin}${path}`, {
         method: "POST",
@@ -176,7 +180,7 @@ export async function runLiveVerification({
       if (!payload) {
         payload = await readJson(response, path);
       }
-      const requirement = validateRequirement(payload, path);
+      const requirement = validateRequirement(payload, path, expectedAmount);
       row.amount = amountFrom(requirement);
       row.payTo = requirement.payTo;
     });
@@ -216,8 +220,10 @@ export async function runLiveVerification({
     assert(Array.isArray(names), "MCP tools/list response is missing result.tools");
     assert(
       JSON.stringify(names) === JSON.stringify(EXPECTED_TOOLS),
-      `MCP tools/list returned [${names.join(", ")}], expected exactly the nine published tools`,
+      `MCP tools/list returned [${names.join(", ")}], expected exactly the ten published tools`,
     );
+    const crypto = body.result.tools.find((tool) => tool.name === "crypto_price");
+    assert(crypto?.inputSchema?.properties?.symbols?.type === "array", "crypto_price.symbols is not an array schema");
   });
 
   await check("/mcp tools/call", async (row) => {
@@ -248,8 +254,8 @@ export async function runLiveVerification({
     } catch {
       throw new Error("unpaid MCP tools/call result.content[0].text is not JSON");
     }
-    const structuredRequirement = validateRequirement(result.structuredContent, "MCP structuredContent");
-    validateRequirement(textPayload, "MCP content[0].text");
+    const structuredRequirement = validateRequirement(result.structuredContent, "MCP structuredContent", "5000");
+    validateRequirement(textPayload, "MCP content[0].text", "5000");
     row.amount = amountFrom(structuredRequirement);
     row.payTo = structuredRequirement.payTo;
   });
@@ -262,6 +268,14 @@ export async function runLiveVerification({
       await readJson(response, path);
     });
   }
+
+  await check("/", async (row) => {
+    const response = await request(fetchImpl, `${origin}/`);
+    row.status = response.status;
+    assert(response.status === 200, `/ returned HTTP ${response.status}, expected 200`);
+    const body = await readJson(response, "/");
+    assert(Array.isArray(body?.tools) && body.tools.length === 10, "/ did not advertise ten tools");
+  });
 
   console.log(fixedWidthTable(rows));
   if (failures.length > 0) {

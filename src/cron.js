@@ -1,6 +1,6 @@
 // Dependency-free 5-field cron "next run" solver.
 
-const MONTHS = { JAN: 0, FEB: 1, MAR: 2, APR: 3, MAY: 4, JUN: 5, JUL: 6, AUG: 7, SEP: 8, OCT: 9, NOV: 10, DEC: 11 };
+const MONTHS = { JAN: 1, FEB: 2, MAR: 3, APR: 4, MAY: 5, JUN: 6, JUL: 7, AUG: 8, SEP: 9, OCT: 10, NOV: 11, DEC: 12 };
 const DOWS = { SUN: 0, MON: 1, TUE: 2, WED: 3, THU: 4, FRI: 5, SAT: 6 };
 
 function parseField(field, min, max, names) {
@@ -44,7 +44,9 @@ export function cronNextRun(expr, afterIso) {
     hour = parseField(fields[1], 0, 23);
     dom = parseField(fields[2], 1, 31);
     month = parseField(fields[3], 1, 12, MONTHS);
-    dow = parseField(fields[4], 0, 6, DOWS);
+    dow = parseField(fields[4], 0, 7, DOWS);
+    // Vixie cron accepts both 0 and 7 for Sunday.
+    if (dow.has(7)) { dow.delete(7); dow.add(0); }
   } catch (e) {
     return { ok: false, error: e.message };
   }

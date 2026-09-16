@@ -4,12 +4,27 @@
   "description": "Paying x402 client for Penniless Data Utilities",
   "type": "module",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/danielarif26/penniless-data-utilities.git",
+    "directory": "client"
+  },
+  "homepage": "https://penniless-json-repair.sjaman.workers.dev",
+  "bugs": {
+    "url": "https://github.com/danielarif26/penniless-data-utilities/issues"
+  },
   "engines": {
     "node": ">=20"
   },
   "bin": {
     "pdu": "./cli.js"
   },
+  "files": [
+    "cli.js",
+    "index.js",
+    "scripts/",
+    "README.md"
+  ],
   "exports": {
     ".": "./index.js",
     "./server": "./index.js"
