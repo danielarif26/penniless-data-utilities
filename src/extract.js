@@ -6,7 +6,7 @@ function decode(s) {
   return s.replace(/&(#x?[0-9a-fA-F]+|\w+);/g, (m, e) => {
     if (e[0] === "#") {
       const cp = e[1] === "x" || e[1] === "X" ? parseInt(e.slice(2), 16) : parseInt(e.slice(1), 10);
-      return Number.isFinite(cp) ? String.fromCodePoint(cp) : m;
+      return Number.isInteger(cp) && cp >= 0 && cp <= 0x10FFFF ? String.fromCodePoint(cp) : m;
     }
     return ENTITIES[e.toLowerCase()] ?? m;
   });
@@ -40,8 +40,15 @@ export function extract(input, opts = {}) {
   if (opts.numbers) {
     out.numbers = [...plain.matchAll(/-?\$?(\d[\d,]*(?:\.\d+)?%?)/g)].map((m) => m[1]).slice(0, 500);
   }
-  if (opts.codeBlocks || looksHtml) {
-    out.codeBlocks = [...text.matchAll(/```[\w+-]*\n([\s\S]*?)```/g)].map((m) => m[1]).slice(0, 50);
+  if (opts.codeBlocks) {
+    const blocks = [...text.matchAll(/```[\w+-]*\n([\s\S]*?)```/g)].map((m) => m[1]);
+    if (looksHtml) {
+      blocks.push(
+        ...[...text.matchAll(/<pre\b[^>]*>([\s\S]*?)<\/pre>/gi)].map((m) => stripTags(m[1]).trim()),
+        ...[...text.matchAll(/<code\b[^>]*>([\s\S]*?)<\/code>/gi)].map((m) => stripTags(m[1]).trim()),
+      );
+    }
+    out.codeBlocks = [...new Set(blocks.filter(Boolean))].slice(0, 50);
   }
 
   const trimmed = plain.replace(/[ \t]+/g, " ").replace(/\n{3,}/g, "\n\n").trim();

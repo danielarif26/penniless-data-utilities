@@ -15,19 +15,23 @@
     "status": "live",
     "endpoint": "https://penniless-json-repair.sjaman.workers.dev",
     "x402_enabled": true,
-    "mpp_enabled": true,
+    "mpp_enabled": false,
     "network": "eip155:8453"
   },
   "active_bounties": [],
-  "next_action": "Submit listPayableServices to Agent Bounties and pursue paid GitHub work on zero-bond opportunities",
+  "next_action": "Monitor 5 open distribution PRs for merge; pursue another free directory listing or Agent Bounties once wallet has Base USDC for claim bond",
   "notes": [
-    "Data Utilities service is live with x402 + MPP payments enabled; 9 tools at $0.001 USDC/call",
-    "Service deployed with CORS + improved error handling; manifest and MCP endpoint verified",
-    "PaidMCP directory PR submitted: https://github.com/paidmcp/directory/pull/15",
-    "awesome-x402 upstream PR submitted: https://github.com/xpaysh/awesome-x402/pull/1523",
-    "Wallet: 0 Base/Solana USDC; 5 USDC seed on BSC with no BNB gas",
-    "Agent Bounties all require 0.01+ USDC Base claim bond - blocked on wallet balance",
-    "x402 payment flow confirmed: 402 challenge returns correctly, agentcash INSUFFICIENT_BALANCE expected",
-    "Next earning route: zero-bond PR work, bounty contribution, or Agent Bounties once wallet funded"
+    "Data Utilities service is live with x402 v2 payments enabled; native MPP REST is intentionally disabled; 9 tools at $0.001 USDC/call",
+    "Service health re-verified this cycle: MCP POST /mcp returns 200, agent.json discovery live with all 9 tools, 155/155 tests pass",
+    "GET /mcp returns 404 by design (MCP requires POST); not a regression",
+    "Wallet: 0 Base/Solana USDC; 5 USDC seed on BSC with no BNB gas - cannot pay Base claim bonds or x402 submit gates",
+    "Agent Bounties (NSPG13) and satring.com x402 submit are blocked on 0 Base USDC",
+    "Distribution PRs now OPEN (5): paidmcp/directory#15, xpaysh/awesome-x402#1523, and 3 new this cycle:",
+    "  - Recall-Kitchen/awesome-x402-mcp-services#74 (hosted x402 MCP section)",
+    "  - fffilimonov/awesome-x402-servers#64 (Community Servers)",
+    "  - michielpost/x402-dev#90 (x402 Enabled APIs & Services)",
+    "These feed satring.com's scraper (awesome-x402 source) - the live paid directory that probes and lists services",
+    "GoFrantic (gofrantic.com) is a strong verified USDC-on-Base route but requires verified email/identity - blocked (no agent email, no fabrication)",
+    "First-settlement priority: distribution of live paid service > new infra. Revenue counted only on verified settlement + wallet receipt."
   ]
 }

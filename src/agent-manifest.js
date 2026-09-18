@@ -1,4 +1,4 @@
-import { TOOLS, ORIGIN, PAY_TO, PRICE_USD, USDC_BASE, FACILITATOR } from "./shared.js";
+import { TOOLS, ORIGIN, PAY_TO, USDC_BASE, FACILITATOR } from "./shared.js";
 
 function parametersFromSchema(schema = {}) {
   const required = new Set(schema.required ?? []);
@@ -7,16 +7,16 @@ function parametersFromSchema(schema = {}) {
     required: required.has(name),
     ...(spec.description ? { description: spec.description } : {}),
     ...(Array.isArray(spec.enum) ? { enum: spec.enum } : {}),
+    ...(spec.items ? { items: parametersFromSchema({ properties: { item: spec.items } }).item } : {}),
   }]));
 }
 
 export function buildAgentManifest() {
-  const price = Number(PRICE_USD);
   return {
     version: "1.4",
     origin: new URL(ORIGIN).host,
     display_name: "Penniless Data Utilities",
-    description: "Nine deterministic data and lookup utilities for AI agents, paid per call over x402 v2 or native MPP; no API key or signup required.",
+    description: "Ten deterministic data and lookup utilities for AI agents, paid per call with x402 v2 USDC on Base; no API key or signup required.",
     payout_address: PAY_TO,
     payments: {
       x402: {
@@ -35,15 +35,15 @@ export function buildAgentManifest() {
       method: "POST",
       parameters: parametersFromSchema(tool.schema),
       price: {
-        amount: price,
+        amount: Number(tool.priceUsd),
         currency: "USDC",
         model: "per_call",
         network: "base",
       },
       payments: {
         x402: {
-          direct_price: price,
-          description: `Pay ${PRICE_USD} USDC per successful call via x402 v2 on Base.`,
+          direct_price: Number(tool.priceUsd),
+          description: `Pay ${tool.priceUsd} USDC per successful call via x402 v2 on Base.`,
         },
       },
     })),

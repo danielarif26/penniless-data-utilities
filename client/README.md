@@ -1,15 +1,24 @@
 # Penniless Data Utilities client
 
-An installable Node.js client for the nine Penniless Data Utilities. It handles
+An installable Node.js client for the ten Penniless Data Utilities. It handles
 the x402 v2 `402 Payment Required` handshake, signs the USDC authorization in
 your process, and retries a paid request once. Node.js 20 or newer is required.
 
-Every paid call costs at most the client's default limit of **0.002 USDC**. The
-service currently advertises **0.001 USDC** per call.
+Pure-compute calls cost **0.005 USDC**; network-backed calls cost **0.02 USDC**.
+The client's default limit is **0.02 USDC**, matching the highest published tier.
+Calls are paid with x402 v2 USDC on Base. The service grants one successful
+free pure-compute trial per client in a rolling 24-hour window; network-backed
+calls always require payment.
 
 ## Install
 
-Clone the repository and install the self-contained client package:
+Once published, run it without a global install:
+
+```sh
+npx penniless-data-utilities-client --help
+```
+
+Until then, clone the repository and install the self-contained client package:
 
 ```sh
 git clone --branch main https://github.com/danielarif26/penniless-data-utilities.git
@@ -120,7 +129,7 @@ amount, nonce, and validity window. Before asking for that signature, the client
 validates the x402 `exact` requirement's resource, Base network, asset, amount,
 and recipient. The raw key never leaves the client process: it is not sent to
 Penniless Data Utilities or the facilitator, and the client redacts it from
-inspection. Only the signed payment object is sent. The default 0.002 USDC
+inspection. Only the signed payment object is sent. The default 0.02 USDC
 tolerance refuses unexpectedly expensive payment requirements.
 
 Use a dedicated, low-balance hot wallet rather than a primary wallet. Keep the

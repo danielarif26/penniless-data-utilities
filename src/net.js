@@ -14,7 +14,8 @@ export function normalizeDomain(input) {
   let d = input.trim().toLowerCase().replace(/\.$/, "");
   try { d = new URL(d.includes("://") ? d : `https://${d}`).hostname; } catch { /* keep raw for regex rejection */ }
   d = d.replace(/\.$/, "");
-  if (!DOMAIN_RE.test(d)) return { ok: false, error: "invalid domain" };
+  // RFC DNS presentation form is at most 253 characters without the root dot.
+  if (d.length > 253 || !DOMAIN_RE.test(d)) return { ok: false, error: "invalid domain" };
   return { ok: true, domain: d };
 }
 
@@ -132,14 +133,55 @@ export async function githubRepoStats(repo, fetchImpl = fetch) {
   };
 }
 
+// CoinGecko simple/price endpoint, cached 30s so a paid call is not charged for
+// a duplicate upstream fetch. Symbols are normalized to CoinGecko ids.
+const COIN_IDS = { eth: "ethereum", btc: "bitcoin", usdc: "usd-coin", sol: "solana" };
+const COIN_SYMBOLS = ["eth", "btc", "usdc", "sol"];
+const priceCache = { ts: 0, data: null };
+
+export async function cryptoPrice(symbols, fetchImpl = fetch, { force = false } = {}) {
+  const want = (Array.isArray(symbols) ? symbols : [symbols])
+    .map((s) => String(s).trim().toLowerCase())
+    .filter(Boolean);
+  const unknown = want.filter((s) => !COIN_SYMBOLS.includes(s));
+  if (unknown.length) return { ok: false, error: `unsupported symbol(s): ${unknown.join(", ")}. Supported: ${COIN_SYMBOLS.join(", ")}` };
+  const ids = [...new Set(want.map((s) => COIN_IDS[s]))].join(",");
+  if (!ids) return { ok: false, error: "at least one symbol is required" };
+  const now = Date.now();
+  if (!force && priceCache.data && now - priceCache.ts < 30000) {
+    const out = {};
+    for (const s of want) out[s] = priceCache.data[COIN_IDS[s]];
+    return { ok: true, source: "cache", cachedAt: new Date(priceCache.ts).toISOString(), prices: out };
+  }
+  let res;
+  try {
+    res = await fetchImpl(`https://api.coingecko.com/api/v3/simple/price?ids=${encodeURIComponent(ids)}&vs_currencies=usd&precision=6`, {
+      headers: { Accept: "application/json", "User-Agent": "penniless-x402/1.0" },
+    });
+  } catch {
+    return { ok: false, error: "upstream CoinGecko request failed" };
+  }
+  if (res.status === 429) return { ok: false, error: "CoinGecko rate limit reached; retry later" };
+  if (!res.ok) return { ok: false, error: `upstream CoinGecko status ${res.status}` };
+  let data;
+  try { data = await res.json(); } catch { return { ok: false, error: "upstream CoinGecko returned non-JSON" }; }
+  priceCache.data = data; priceCache.ts = now;
+  const out = {};
+  for (const s of want) out[s] = data[COIN_IDS[s]] ? { usd: data[COIN_IDS[s]].usd } : null;
+  return { ok: true, source: "coingecko", fetchedAt: new Date(now).toISOString(), prices: out };
+}
+
 export function validateEmailSyntax(email) {
   if (typeof email !== "string") return { ok: false, error: "field 'email' must be a string" };
   const e = email.trim();
   if (e.length > 320) return { ok: false, error: "email too long" };
-  const formatValid = EMAIL_RE.test(e);
   const at = e.lastIndexOf("@");
+  const local = at >= 0 ? e.slice(0, at) : e;
   const domain = at >= 0 ? e.slice(at + 1).toLowerCase().replace(/\.$/, "") : "";
-  return { ok: true, email: e, formatValid, local: at >= 0 ? e.slice(0, at) : e, domain };
+  const dotAtomValid = local.length > 0 && local.length <= 64
+    && !local.startsWith(".") && !local.endsWith(".") && !local.includes("..");
+  const formatValid = EMAIL_RE.test(e) && dotAtomValid && domain.length <= 253;
+  return { ok: true, email: e, formatValid, local, domain };
 }
 
 export async function validateEmail(email, fetchImpl = fetch) {

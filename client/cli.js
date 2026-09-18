@@ -19,6 +19,8 @@ const TOOL_METHODS = new Map([
   ["dns_lookup", "dnsLookup"],
   ["github-repo-stats", "githubRepoStats"],
   ["github_repo_stats", "githubRepoStats"],
+  ["crypto-price", "cryptoPrice"],
+  ["crypto_price", "cryptoPrice"],
   ["email-validate", "emailValidate"],
   ["email_validate", "emailValidate"],
 ]);
@@ -32,6 +34,7 @@ const CANONICAL_TOOLS = [
   "domain-whois",
   "dns-lookup",
   "github-repo-stats",
+  "crypto-price",
   "email-validate",
 ];
 
@@ -119,6 +122,8 @@ function toolArguments(method, args) {
       return [args.domain, args.type];
     case "githubRepoStats":
       return [args.repo];
+    case "cryptoPrice":
+      return [args.symbols];
     case "emailValidate":
       return [args.email];
     default:

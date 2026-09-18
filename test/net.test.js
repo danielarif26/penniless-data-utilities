@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { normalizeDomain, parseRdap, whois, dnsLookup, githubRepoStats, validateEmailSyntax, validateEmail } from "../src/net.js";
+import { normalizeDomain, parseRdap, whois, dnsLookup, githubRepoStats, cryptoPrice, validateEmailSyntax, validateEmail } from "../src/net.js";
 
 function jsonRes(body, status = 200) {
   return { ok: status >= 200 && status < 300, status, json: async () => body };
@@ -157,6 +157,29 @@ test("githubRepoStats surfaces rate limiting as a retryable error", async () => 
   assert.match(r.error, /rate limit/);
 });
 
+// --- crypto price ---
+const CG = {
+  ethereum: { usd: 2403.991677 }, bitcoin: { usd: 75960.131286 },
+  "usd-coin": { usd: 0.999718 }, solana: { usd: 97.154749 },
+};
+test("cryptoPrice returns live prices for requested symbols", async () => {
+  const r = await cryptoPrice(["eth", "btc"], fakeFetch([["api.coingecko.com", jsonRes(CG)]]), { force: true });
+  assert.equal(r.ok, true);
+  assert.equal(r.source, "coingecko");
+  assert.equal(r.prices.eth.usd, 2403.991677);
+  assert.equal(r.prices.btc.usd, 75960.131286);
+});
+test("cryptoPrice rejects unsupported symbols", async () => {
+  const r = await cryptoPrice(["doge"], fakeFetch([]), { force: true });
+  assert.equal(r.ok, false);
+  assert.match(r.error, /unsupported symbol/);
+});
+test("cryptoPrice surfaces upstream rate limiting", async () => {
+  const r = await cryptoPrice(["eth"], fakeFetch([["api.coingecko.com", jsonRes({}, 429)]]), { force: true });
+  assert.equal(r.ok, false);
+  assert.match(r.error, /rate limit/);
+});
+
 // --- email ---
 test("validateEmailSyntax accepts and splits valid addresses", () => {
   const r = validateEmailSyntax("  Foo.Bar+tag@Example.com  ");
@@ -171,6 +194,22 @@ test("validateEmailSyntax rejects malformed addresses", () => {
     assert.equal(validateEmailSyntax(bad).formatValid, false, JSON.stringify(bad));
   }
   assert.equal(validateEmailSyntax(123).ok, false);
+});
+
+test("validateEmailSyntax enforces dot-atom and local-part length rules", () => {
+  for (const bad of [
+    ".foo@example.com", "foo.@example.com", "foo..bar@example.com",
+    `${"a".repeat(65)}@example.com`,
+  ]) {
+    assert.equal(validateEmailSyntax(bad).formatValid, false, bad);
+  }
+  assert.equal(validateEmailSyntax(`${"a".repeat(64)}@example.com`).formatValid, true);
+});
+
+test("normalizeDomain rejects names longer than the DNS presentation limit", () => {
+  const long = `${"a".repeat(63)}.${"b".repeat(63)}.${"c".repeat(63)}.${"d".repeat(63)}.com`;
+  assert.ok(long.length > 253);
+  assert.equal(normalizeDomain(long).ok, false);
 });
 
 test("validateEmail format-invalid short-circuits without a DNS call", async () => {

@@ -7,38 +7,27 @@ const ENV = (typeof process !== "undefined" && process.env) || {};
 export const PAY_TO = ENV.X402_PAY_TO || "0x3D98800c64C345950E1eAaa076D88C12d1BF5F37";
 export const NETWORK = ENV.X402_NETWORK || "eip155:8453";
 export const FACILITATOR = ENV.X402_FACILITATOR || "https://facilitator.payai.network";
-export const PRICE = ENV.X402_PRICE || "$0.001";
-export const PRICE_USD = Number.parseFloat(String(PRICE).replace("$", "")).toFixed(6);
-export const ORIGIN = ENV.X402_ORIGIN || "https://penniless-json-repair.sjaman.workers.dev";
-export const ACCEPTS = { scheme: "exact", price: PRICE, network: NETWORK, payTo: PAY_TO };
+export const COMPUTE_PRICE = ENV.X402_COMPUTE_PRICE || "$0.005";
+export const NETWORK_PRICE = ENV.X402_NETWORK_PRICE || "$0.02";
+export const ORIGIN = ENV.X402_ORIGIN || ENV.PUBLIC_ORIGIN || "https://penniless-json-repair.sjaman.workers.dev";
 export const MAX_INPUT = 200000;
 
-// Native form (atomic units + contract address) that the facilitator echoes back
-// in the 402 requirement. The MCP payment wrapper needs this, not "$0.001".
+// Native asset form used by the MCP payment wrapper and public rail metadata.
 export const USDC_BASE = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
-export const PRICE_ATOMIC = String(Math.round(Number(String(PRICE).replace("$", "")) * 1e6));
-export const MCP_ACCEPTS = {
-  scheme: "exact",
-  network: NETWORK,
-  amount: PRICE_ATOMIC,
-  asset: USDC_BASE,
-  payTo: PAY_TO,
-  maxTimeoutSeconds: 300,
-  extra: { name: "USD Coin", version: "2" },
-};
 
 import { repairJson } from "./repair.js";
 import { yamlToValue } from "./yaml.js";
 import { cronNextRun } from "./cron.js";
 import { diffLines } from "./diff.js";
 import { extract } from "./extract.js";
-import { whois, dnsLookup, githubRepoStats, validateEmail } from "./net.js";
+import { whois, dnsLookup, githubRepoStats, cryptoPrice, validateEmail } from "./net.js";
 
 const str = { type: "string" };
 const obj = (properties, required) => ({ type: "object", properties, required, additionalProperties: false });
 
 export const TOOLS = {
   "/repair/json": {
+    price: COMPUTE_PRICE,
     mcpName: "repair_json",
     serviceName: "Penniless JSON Repair",
     tags: ["json", "llm", "repair", "agent-tools"],
@@ -49,16 +38,18 @@ export const TOOLS = {
     out: { ok: true, repaired: { foo: "bar" }, applied: ["fences", "unquoted-keys", "single-quotes"] },
   },
   "/yaml/tojson": {
+    price: COMPUTE_PRICE,
     mcpName: "yaml_to_json",
     serviceName: "Penniless YAML to JSON",
     tags: ["yaml", "json", "convert", "config"],
-    desc: "Converts a YAML subset (block maps, sequences, nested indentation, scalars, comments) into JSON with no runtime dependency. Body {input} -> {ok, value, warnings}.",
+    desc: "Converts YAML 1.2 core syntax (maps, sequences, nested structures, scalar values, comments, anchors/aliases) into JSON with bounded alias expansion. Body {input} -> {ok, value, warnings}.",
     input: { input: "name: web\nports:\n  - 80\n  - 443\ndb:\n  host: localhost\n  tls: true\n" },
     schema: obj({ input: { ...str, description: "YAML document text" } }, ["input"]),
     handler: (a) => yamlToValue(a.input),
     out: { ok: true, value: { name: "web", ports: [80, 443], db: { host: "localhost", tls: true } }, warnings: [] },
   },
   "/cron/nextrun": {
+    price: COMPUTE_PRICE,
     mcpName: "cron_next_run",
     serviceName: "Penniless Cron Next Run",
     tags: ["cron", "schedule", "scheduler", "devops"],
@@ -72,6 +63,7 @@ export const TOOLS = {
     out: { ok: true, next: "2026-09-14T09:00:00.000Z", epochMs: 1789866000000 },
   },
   "/diff": {
+    price: COMPUTE_PRICE,
     mcpName: "text_diff",
     serviceName: "Penniless Text Diff",
     tags: ["diff", "unified-diff", "text", "compare"],
@@ -86,6 +78,7 @@ export const TOOLS = {
     out: { ok: true, identical: false, added: 1, removed: 1, unified: "@@ -1,3 +1,3 @@\n a\n-b\n+B\n c" },
   },
   "/text/extract": {
+    price: COMPUTE_PRICE,
     mcpName: "text_extract",
     serviceName: "Penniless Text Extract",
     tags: ["html", "text", "extraction", "links", "emails"],
@@ -93,13 +86,14 @@ export const TOOLS = {
     input: { input: "<h1>Hi</h1><p>Visit https://x.dev and mail a@b.com</p>" },
     schema: obj({
       input: { ...str, description: "HTML or plain text" },
-      numbers: { type: "boolean", description: "Keep numeric strings in text output" },
-      codeBlocks: { type: "boolean", description: "Keep pre/code blocks" },
+      numbers: { type: "boolean", description: "Extract numeric strings into numbers[]" },
+      codeBlocks: { type: "boolean", description: "Extract Markdown fences and HTML pre/code blocks into codeBlocks[]" },
     }, ["input"]),
     handler: (a) => extract(a.input, a),
     out: { ok: true, source: "html", headings: [{ level: 1, text: "Hi" }], urls: ["https://x.dev"], emails: ["a@b.com"], text: "Hi Visit https://x.dev and mail a@b.com" },
   },
   "/domain/whois": {
+    price: NETWORK_PRICE,
     mcpName: "domain_whois",
     serviceName: "Penniless WHOIS Lookup",
     tags: ["whois", "rdap", "domain", "osint", "registrar"],
@@ -110,6 +104,7 @@ export const TOOLS = {
     out: { ok: true, found: true, domain: "example.com", registrar: "Example Registrar, Inc.", status: ["client transfer prohibited"], events: { expiration: "2027-08-14T04:00:00Z", registration: "1995-08-14T04:00:00Z" }, nameservers: ["a.iana-servers.net", "b.iana-servers.net"], dnssec: { signed: true } },
   },
   "/dns/lookup": {
+    price: NETWORK_PRICE,
     mcpName: "dns_lookup",
     serviceName: "Penniless DNS Lookup",
     tags: ["dns", "doh", "a", "aaaa", "mx", "txt", "ns", "cname", "caa"],
@@ -117,12 +112,13 @@ export const TOOLS = {
     input: { domain: "example.com", type: "MX" },
     schema: obj({
       domain: { ...str, description: "Hostname to resolve" },
-      type: { ...str, description: "Record type (default A)", enum: ["A", "AAAA", "CNAME", "MX", "TXT", "NS", "SOA", "PTR", "SRV", "CAA"] },
+      type: { ...str, description: "Record type (default A)", enum: ["A", "AAAA", "CNAME", "MX", "TXT", "NS", "SOA", "PTR", "SRV", "CAA"], caseInsensitive: true },
     }, ["domain"]),
     handler: (a) => dnsLookup(a.domain, a.type),
     out: { ok: true, domain: "example.com", type: "MX", status: "NOERROR", answers: [{ name: "example.com", type: "MX", ttl: 180, data: "0 ." }] },
   },
   "/github/repo-stats": {
+    price: NETWORK_PRICE,
     mcpName: "github_repo_stats",
     serviceName: "Penniless GitHub Repo Stats",
     tags: ["github", "repository", "stars", "popularity", "oss"],
@@ -132,17 +128,57 @@ export const TOOLS = {
     handler: (a) => githubRepoStats(a.repo),
     out: { ok: true, found: true, repo: "copperheadhq/copperhead", stars: 254, forks: 62, openIssues: 184, language: "TypeScript", license: "Apache-2.0", pushedAt: "2026-09-13T20:41:25Z" },
   },
+  "/price/crypto": {
+    price: NETWORK_PRICE,
+    mcpName: "crypto_price",
+    serviceName: "Penniless Crypto Price",
+    tags: ["crypto", "price", "coingecko", "btc", "eth", "usdc", "sol", "x402"],
+    desc: "Live USD prices for ETH, BTC, USDC, SOL from CoinGecko (30s cache). Body {symbols: ['eth','btc','usdc','sol']} -> {ok, source, prices: {eth:{usd}, btc:{usd}, ...}}.",
+    input: { symbols: ["eth", "btc", "usdc", "sol"] },
+    schema: obj({
+      symbols: {
+        type: "array",
+        description: "Coin symbols, any of: eth, btc, usdc, sol",
+        items: { type: "string", enum: ["eth", "btc", "usdc", "sol"] },
+      },
+    }, ["symbols"]),
+    handler: (a) => cryptoPrice(a.symbols),
+    out: { ok: true, source: "coingecko", fetchedAt: "2026-09-16T00:00:00.000Z", prices: { eth: { usd: 2403.99 }, btc: { usd: 75960.13 }, usdc: { usd: 0.9997 }, sol: { usd: 97.15 } } },
+  },
   "/email/validate": {
+    price: NETWORK_PRICE,
     mcpName: "email_validate",
     serviceName: "Penniless Email Validate",
     tags: ["email", "validation", "smtp", "mx", "deliverability"],
-    desc: "Email deliverability check: RFC-style syntax plus live MX probe of the domain. Body {email} -> {ok, valid, formatValid, domainHasMx, mx[]}.",
+    desc: "Email domain validation: RFC-style unquoted syntax plus a live MX probe. It checks whether the domain advertises mail reception; it does not verify that a mailbox exists. Body {email} -> {ok, valid, formatValid, domainHasMx, mx[]}.",
     input: { email: "hello@example.com" },
     schema: obj({ email: { ...str, description: "Email address" } }, ["email"]),
     handler: (a) => validateEmail(a.email),
     out: { ok: true, email: "hello@example.com", valid: true, formatValid: true, domainHasMx: true, mx: [{ preference: 0, host: "" }], status: "NOERROR" },
   },
 };
+
+// Enrich each authoritative tool entry with the exact payment objects consumed
+// by REST and MCP.  This makes it impossible for those surfaces to choose a
+// price independently of the catalogue.
+for (const tool of Object.values(TOOLS)) {
+  tool.priceUsd = Number.parseFloat(tool.price.slice(1)).toFixed(6);
+  tool.priceAtomic = String(Math.round(Number(tool.price.slice(1)) * 1e6));
+  tool.accepts = { scheme: "exact", price: tool.price, network: NETWORK, payTo: PAY_TO };
+  tool.mcpAccepts = {
+    scheme: "exact",
+    network: NETWORK,
+    amount: tool.priceAtomic,
+    asset: USDC_BASE,
+    payTo: PAY_TO,
+    maxTimeoutSeconds: 300,
+    extra: { name: "USD Coin", version: "2" },
+  };
+}
+
+export const COMPUTE_TOOL_PATHS = Object.entries(TOOLS)
+  .filter(([, tool]) => tool.price === COMPUTE_PRICE)
+  .map(([path]) => path);
 
 export const SEMANTIC = [
   "Deterministic, dependency-free data utilities served over x402 micropayments (USDC on Base). None of these call another AI model.",
@@ -197,11 +233,22 @@ export function validateArgs(schema, args) {
       if (typeof value !== "number" || !Number.isFinite(value)) return `field '${key}' must be a number`;
     } else if (spec.type === "boolean") {
       if (typeof value !== "boolean") return `field '${key}' must be a boolean`;
+    } else if (spec.type === "array") {
+      if (!Array.isArray(value)) return `field '${key}' must be an array`;
+      const item = spec.items;
+      if (item) {
+        for (const element of value) {
+          if (item.type === "string" && typeof element !== "string") return `field '${key}' items must be strings`;
+          if (item.type === "number" && (typeof element !== "number" || !Number.isFinite(element))) return `field '${key}' items must be numbers`;
+          if (item.type === "boolean" && typeof element !== "boolean") return `field '${key}' items must be booleans`;
+          if (item.enum && !item.enum.includes(element)) return `field '${key}' items must be one of ${item.enum.join(", ")}`;
+        }
+      }
     }
     if (spec.enum) {
-      // The one enum in the catalogue is a DNS record type, which the handler
-      // already case-folds; HTTP callers used lowercase before, so keep it.
-      const ok = spec.enum.some((e) => String(e).toLowerCase() === String(value).toLowerCase());
+      const ok = spec.caseInsensitive
+        ? spec.enum.some((e) => String(e).toLowerCase() === String(value).toLowerCase())
+        : spec.enum.includes(value);
       if (!ok) return `field '${key}' must be one of ${spec.enum.join(", ")}`;
     }
   }

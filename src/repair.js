@@ -23,16 +23,16 @@ function extractJsonRegion(s) {
   else start = Math.min(firstObj, firstArr);
   const open = s[start];
   const close = open === "{" ? "}" : "]";
-  let depth = 0, inStr = false, esc = false, end = -1;
+  let depth = 0, quote = null, esc = false, end = -1;
   for (let i = start; i < s.length; i++) {
     const c = s[i];
-    if (inStr) {
+    if (quote) {
       if (esc) esc = false;
       else if (c === "\\") esc = true;
-      else if (c === '"') inStr = false;
+      else if (c === quote) quote = null;
       continue;
     }
-    if (c === '"') inStr = true;
+    if (c === '"' || c === "'") quote = c;
     else if (c === open) depth++;
     else if (c === close) {
       depth--;
@@ -99,7 +99,12 @@ function fixSingleQuotes(s) {
         esc = false;
         continue;
       }
-      if (c === "\\") { out += c; esc = true; continue; }
+      if (c === "\\") {
+        // In a single-quoted pseudo-JSON string, \' represents a literal
+        // apostrophe. JSON double-quoted strings do not need that backslash.
+        if (s[i + 1] === "'") { out += "'"; i++; continue; }
+        out += c; esc = true; continue;
+      }
       if (c === "'") { out += '"'; inSingle = false; continue; }
       out += (c === '"') ? '\\"' : c;
       continue;
@@ -180,8 +185,8 @@ export function repairJson(input) {
   if (direct.ok) {
     return { ok: true, repaired: direct.value, applied };
   }
-  const steps = [stripFences, extractJsonRegion, stripComments, replacePythonLiterals,
-    quoteUnquotedKeys, fixSingleQuotes, removeTrailingCommas];
+  const steps = [stripFences, extractJsonRegion, fixSingleQuotes, stripComments,
+    replacePythonLiterals, quoteUnquotedKeys, removeTrailingCommas];
   let cur = s;
   for (const step of steps) {
     const r = step(cur);

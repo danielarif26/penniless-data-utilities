@@ -179,7 +179,7 @@ function paymentRequired(response) {
 
 test.beforeEach(() => db.clear());
 
-test("settlement evidence recognizes x402 Payment-Response and native MPP Payment-Receipt", () => {
+test("settlement evidence recognizes Payment-Response and Payment-Receipt headers", () => {
   assert.equal(hasSettlementResponse(new Response(null, { headers: { "payment-response": "x402-ok" } })), true);
   assert.equal(hasSettlementResponse(new Response(null, { headers: { "payment-receipt": "mpp-ok" } })), true);
   assert.equal(hasSettlementResponse(new Response(null, { headers: { "www-authenticate": "Payment ..." } })), false);
@@ -218,26 +218,30 @@ test("free /diagnose increments free_requests and not paid_attempts", async () =
   assert.equal((await stats.json()).by_endpoint["/diagnose"].free_requests, 1);
 });
 
-test("/stats returns totals and all nine paid endpoint keys", async () => {
+test("/stats returns totals and all ten paid endpoint keys", async () => {
   await fetchWithCounters("/repair/json", "GET");
   const response = await fetchWithCounters("/stats", "GET");
   assert.equal(response.status, 200);
   const body = await response.json();
   assert.deepEqual(Object.keys(body.counters).sort(), [
-    "free_requests", "paid_attempts", "settled_success", "total_requests",
+    "free_requests", "paid_attempts", "payment_challenges", "settled_success", "total_requests",
   ].sort());
   for (const path of Object.keys(TOOLS)) {
     assert.ok(body.by_endpoint[path], `missing paid endpoint counter for ${path}`);
     assert.deepEqual(Object.keys(body.by_endpoint[path]).sort(), [
-      "first_seen", "free_requests", "last_seen", "paid_attempts", "requests", "settled_success",
+      "first_seen", "free_requests", "last_seen", "paid_attempts", "payment_challenges", "requests", "settled_success",
     ].sort());
   }
   assert.deepEqual(body.counters, {
     total_requests: 1,
     paid_attempts: 1,
+    payment_challenges: 1,
     settled_success: 0,
     free_requests: 0,
   });
+  assert.match(body.counter_semantics.paid_attempts, /legacy counter/);
+  assert.match(body.counter_semantics.settled_success, /verified successful settlements/);
+  assert.match(body.note, /No verified paid sales/);
   assert.equal(body.by_endpoint["/repair/json"].requests, 1);
   assert.ok(body.by_endpoint["/repair/json"].first_seen);
   assert.ok(body.by_endpoint["/repair/json"].last_seen);

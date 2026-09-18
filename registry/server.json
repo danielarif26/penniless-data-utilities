@@ -1,0 +1,25 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.danielarif26/penniless-data-utilities",
+  "title": "Penniless Data Utilities",
+  "description": "Ten x402-paid tools for JSON, YAML, cron, diff, text, DNS, WHOIS, GitHub, crypto, and email.",
+  "version": "3.1.0",
+  "websiteUrl": "https://penniless-json-repair.sjaman.workers.dev",
+  "repository": {
+    "url": "https://github.com/danielarif26/penniless-data-utilities",
+    "source": "github"
+  },
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://penniless-json-repair.sjaman.workers.dev/mcp"
+    }
+  ],
+  "_meta": {
+    "io.modelcontextprotocol.registry/publisher-provided": {
+      "payment": "x402 v2, exact scheme, USDC on Base",
+      "pricing": "Five pure-compute tools cost $0.005 USDC per call; five network-backed tools cost $0.02 USDC per call.",
+      "toolCount": 10
+    }
+  }
+}

@@ -30,7 +30,7 @@ async function withClient(run) {
   }
 }
 
-test("mcp lists all nine tools with descriptions and schemas", async () => {
+test("mcp lists all ten tools with descriptions, prices, and source schemas", async () => {
   await withClient(async (client) => {
     const { tools } = await client.listTools();
     assert.equal(tools.length, Object.keys(TOOLS).length);
@@ -39,13 +39,37 @@ test("mcp lists all nine tools with descriptions and schemas", async () => {
     for (const tool of tools) {
       assert.ok(tool.description.includes("per call"), `${tool.name} should state pricing`);
       assert.equal(tool.inputSchema.type, "object");
-      assert.equal(tool.inputSchema.additionalProperties, false, `${tool.name} must reject unknown arguments`);
       assert.ok(Array.isArray(tool.inputSchema.required) && tool.inputSchema.required.length > 0);
     }
     const repair = tools.find((t) => t.name === "repair_json");
     assert.ok(repair.inputSchema.properties.input);
+    assert.match(repair.description, /\$0\.005/);
     const dns = tools.find((t) => t.name === "dns_lookup");
     assert.deepEqual(dns.inputSchema.properties.type.enum.slice(0, 3), ["A", "AAAA", "CNAME"]);
+    assert.match(dns.description, /\$0\.02/);
+
+    // This is a live MCP contract assertion: listTools() returns the schema
+    // actually advertised by the transport, rather than an implementation
+    // detail.  Any REST/source schema drift fails CI for every tool.
+    for (const source of Object.values(TOOLS)) {
+      const advertised = tools.find((tool) => tool.name === source.mcpName).inputSchema;
+      assert.equal(advertised.type, source.schema.type, `${source.mcpName} root type`);
+      assert.equal(advertised.additionalProperties, source.schema.additionalProperties, `${source.mcpName} additionalProperties`);
+      assert.deepEqual(advertised.required ?? [], source.schema.required ?? [], `${source.mcpName} required fields`);
+      for (const [name, spec] of Object.entries(source.schema.properties)) {
+        const field = advertised.properties[name];
+        assert.ok(field, `${source.mcpName}.${name} missing from MCP schema`);
+        assert.equal(field.type, spec.type, `${source.mcpName}.${name} type`);
+        assert.deepEqual(field.enum, spec.enum, `${source.mcpName}.${name} enum`);
+        if (spec.items) {
+          assert.equal(field.items?.type, spec.items.type, `${source.mcpName}.${name} item type`);
+          assert.deepEqual(field.items?.enum, spec.items.enum, `${source.mcpName}.${name} item enum`);
+        }
+      }
+    }
+    const crypto = tools.find((t) => t.name === "crypto_price");
+    assert.equal(crypto.inputSchema.properties.symbols.type, "array");
+    assert.deepEqual(crypto.inputSchema.properties.symbols.items.enum, ["eth", "btc", "usdc", "sol"]);
   });
 });
 
@@ -60,7 +84,7 @@ test("mcp tools/call returns a payment requirement when unpaid", async () => {
     assert.equal(payload.x402Version, 2);
     assert.equal(payload.accepts[0].scheme, "exact");
     assert.equal(payload.accepts[0].network, "eip155:8453");
-    assert.equal(payload.accepts[0].amount, "1000");
+    assert.equal(payload.accepts[0].amount, "5000");
     assert.equal(payload.accepts[0].asset, "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913");
   });
 });

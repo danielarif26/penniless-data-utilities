@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { buildAgentManifest } from "../src/agent-manifest.js";
-import { FACILITATOR, PAY_TO, PRICE_USD, TOOLS, USDC_BASE } from "../src/shared.js";
+import { FACILITATOR, PAY_TO, TOOLS, USDC_BASE } from "../src/shared.js";
 
 test("agent.json manifest exposes every paid tool with Base USDC pricing", () => {
   const manifest = buildAgentManifest();
@@ -24,13 +24,16 @@ test("agent.json manifest exposes every paid tool with Base USDC pricing", () =>
     assert.ok(intent, `missing intent for ${endpoint}`);
     assert.equal(intent.name, tool.mcpName);
     assert.equal(intent.method, "POST");
-    assert.equal(intent.price.amount, Number(PRICE_USD));
+    assert.equal(intent.price.amount, Number(tool.priceUsd));
     assert.equal(intent.price.currency, "USDC");
     assert.equal(intent.price.model, "per_call");
     assert.equal(intent.price.network, "base");
-    assert.equal(intent.payments.x402.direct_price, Number(PRICE_USD));
+    assert.equal(intent.payments.x402.direct_price, Number(tool.priceUsd));
     for (const required of tool.schema.required ?? []) {
       assert.equal(intent.parameters[required]?.required, true, `${endpoint} ${required} should be required`);
+    }
+    if (tool.schema.properties.symbols?.items) {
+      assert.deepEqual(intent.parameters.symbols.items.enum, tool.schema.properties.symbols.items.enum);
     }
   }
 });

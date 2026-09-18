@@ -56,8 +56,12 @@ function hunkRanges(ops, ctx) {
 }
 
 export function diffLines(oldText, newText, ctx = 3) {
-  const a = String(oldText).replace(/\r\n?/g, "\n").split("\n");
-  const b = String(newText).replace(/\r\n?/g, "\n").split("\n");
+  const splitLines = (value) => {
+    const normalized = String(value).replace(/\r\n?/g, "\n");
+    return normalized === "" ? [] : normalized.split("\n");
+  };
+  const a = splitLines(oldText);
+  const b = splitLines(newText);
   if (a.length * b.length > 1_000_000) {
     return { ok: false, error: "input too large for diff (limit ~1M line-pairs)" };
   }

@@ -161,11 +161,11 @@ test("requirements above the default USDC tolerance are refused", async () => {
   const signer = recordingSigner();
   const client = createPennilessClient({
     baseUrl: BASE_URL,
-    fetch: async () => paymentResponse({ accepted: { amount: "2001" } }),
+    fetch: async () => paymentResponse({ accepted: { amount: "20001" } }),
     signerAdapter: signer.adapter,
   });
 
-  await assert.rejects(() => client.tools.repairJson("{}"), /tolerance|0\.002|2001/i);
+  await assert.rejects(() => client.tools.repairJson("{}"), /tolerance|0\.02|20001/i);
   assert.equal(signer.calls.length, 0, "an over-tolerance requirement must not be signed");
 });
 
@@ -198,7 +198,7 @@ test("free helpers never invoke the signer and rawFetch returns its Response unt
   assert.equal(signer.calls.length, 0);
 });
 
-test("the client exposes all nine REST tool helpers", () => {
+test("the client exposes all ten REST tool helpers", () => {
   const client = createPennilessClient({
     baseUrl: BASE_URL,
     fetch: async () => jsonResponse({ ok: true }),
@@ -206,6 +206,7 @@ test("the client exposes all nine REST tool helpers", () => {
   });
   assert.deepEqual(Object.keys(client.tools).sort(), [
     "cronNextRun",
+    "cryptoPrice",
     "dnsLookup",
     "domainWhois",
     "emailValidate",
